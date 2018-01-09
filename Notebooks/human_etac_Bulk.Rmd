@@ -1,0 +1,932 @@
+
+---
+title: "Human eTACS - bulk RNA seq analysis"
+output:
+  html_notebook: default
+---
+
+## Introduction
+Bulk RNA-sequencing from human eTACs (CCR7+ PDL1+), a form of dendritic cells.  We can compare these to the previously sequenced bulk mTECs and conventional DCs.  I also wish to test the hypothesis that these cells are part of the normal differentiation of DCs from a monocyte precursor.  We also want to see whether there is any spike in the proportions of TRAs that these cells expressed during their transient _AIRE_ expression.
+
+06-11-2017 UPDATE: Following Jo's email the flow cytometry gating for the tonsil DCs in the most recent bulk RNAseq are better as they exclude more pDCs.  Subsequently only these cDCs will be used.  Additionally the multiple sitmulation samples do not add anything, so I will just use the unstimulated and LPS stimulated samples from that data set.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(lsa)
+library(biomaRt)
+library(reshape2)
+library(pheatmap)
+library(flashClust)
+library(DESeq2)
+library(VennDiagram)
+library(cowplot)
+library(sva)
+library(limma)
+library(pheatmap)
+source('~/Dropbox/R_sessions/Clustering/CosineKNN.R')
+source("~/Dropbox/R_sessions/GGMike/theme_mike.R")
+
+# define cell colouring vector
+cell.cols <- c("#0000FC", "#0F8C08", "#000000", "#DB33C7")
+names(cell.cols) <- c("cDC", "eTAC", "mTEC", "stimDC")
+
+stim.cols <- c(cell.cols, "#FFAA00", "#A5009E")
+names(stim.cols) <- c(names(cell.cols), "moDC.Unstim", "moDC.LPS")
+
+etac.counts <- read.table("~/Dropbox/ETACS/human_etacs/bulk_etac_readcounts.txt",
+                          h=TRUE, sep="\t", stringsAsFactors=FALSE)
+rownames(etac.counts) <- etac.counts$ensembl_gene_id
+
+bulk.counts <- read.table("~/Dropbox/ETACS/human_etacs/bulk_readcounts.tsv",
+                          h=TRUE, sep="\t", stringsAsFactors=FALSE,
+                          comment.char="")
+
+rownames(bulk.counts) <- bulk.counts$ensembl_gene_id
+#cdc <- bulk.counts[, grepl(colnames(bulk.counts), pattern="cDC")][, c(1:3)]
+mtec <- bulk.counts[, grepl(colnames(bulk.counts), pattern="mTEC")][, c(1:3)]
+
+etacs <- etac.counts[, grepl(colnames(etac.counts), pattern="eTAC")]
+tDC <- etac.counts[, grepl(colnames(etac.counts), pattern="cDC")]
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+nz <- rowSums(tDC) > 3
+tDC.nz <- tDC[nz, ]
+name.split <- strsplit(colnames(tDC.nz), fixed=T, split="_")
+
+tDC.meta <- data.frame(cbind(colnames(tDC.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("tDC", "tDC", "tDC")))
+colnames(tDC.meta) <- c("Sample", "Replicate", "CellType")
+rownames(tDC.meta) <- tDC.meta$Sample
+
+dse <- DESeqDataSetFromMatrix(tDC.nz, colData=tDC.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+tDC.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+tDC.norm$gene_id <- rownames(tDC.norm)
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+nz <- rowSums(mtec) > 3
+mtec.nz <- mtec[nz, ]
+name.split <- strsplit(colnames(mtec.nz), fixed=T, split="_")
+
+mtec.meta <- data.frame(cbind(colnames(mtec.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("mTEC", "mTEC", "mTEC")))
+colnames(mtec.meta) <- c("Sample", "Replicate", "CellType")
+rownames(mtec.meta) <- mtec.meta$Sample
+mtec.meta$Donor <- mtec.meta$Replicate
+mtec.meta$Stimulation <- mtec.meta$CellType
+mtec.meta <- mtec.meta[, c("Sample", "CellType", "Donor", "Stimulation")]
+
+dse <- DESeqDataSetFromMatrix(mtec.nz, colData=mtec.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+mtec.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+mtec.norm$gene_id <- rownames(mtec.norm)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# nz <- rowSums(cdc) > 3
+# cdc.nz <- cdc[nz, ]
+# name.split <- strsplit(colnames(cdc.nz), fixed=T, split="_")
+# 
+# cdc.meta <- data.frame(cbind(colnames(cdc.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+#                               c("cDC", "cDC", "cDC")))
+# colnames(cdc.meta) <- c("Sample", "Replicate", "CellType")
+# rownames(cdc.meta) <- cdc.meta$Sample
+# 
+# dse <- DESeqDataSetFromMatrix(cdc.nz, colData=cdc.meta, design=~1)
+# dse <- estimateSizeFactors(dse)
+# cdc.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+# cdc.norm$gene_id <- rownames(cdc.norm)
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+nz <- rowSums(etacs) > 3
+etacs.nz <- etacs[nz, ]
+name.split <- strsplit(colnames(etacs.nz), fixed=T, split="_")
+
+etacs.meta <- data.frame(cbind(colnames(etacs.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("eTAC", "eTAC", "eTAC")))
+colnames(etacs.meta) <- c("Sample", "Replicate", "CellType")
+rownames(etacs.meta) <- etacs.meta$Sample
+
+dse <- DESeqDataSetFromMatrix(etacs.nz, colData=etacs.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+etacs.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+etacs.norm$gene_id <- rownames(etacs.norm)
+```
+
+The first thing to address, is where are the eTACs placed in relation to the other dendritic cell subsets?
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+all.data <- Reduce(x=list("cDC"=tDC.norm, "eTAC"=etacs.norm, "mTEC"=mtec.norm),
+                   f=function(x, y) merge(x, y, by='gene_id', all=TRUE))
+rownames(all.data) <- all.data$gene_id
+all.data <- all.data[, -1]
+all.data[is.na(all.data)] <- 0
+
+# remove all zero genes
+gene_sparse <- apply(all.data == 0, 1, sum)/dim(all.data)[2]
+all.data <- all.data[gene_sparse <= 0.6 ,]
+
+# don't include the mTECs for PCA, they will be very different
+lymph.pca <- prcomp(t(all.data[, !grepl(colnames(all.data), pattern="mTEC")]), scale=TRUE, center=TRUE)
+lymph.pcs <- as.data.frame(lymph.pca$x)
+colnames(lymph.pcs) <- paste0("PC", 1:dim(lymph.pcs)[2])
+lymph.pcs$Sample <- colnames(all.data[, !grepl(colnames(all.data), pattern="mTEC")])
+lymph.pcs$CellType <- ""
+lymph.pcs$CellType[grepl(lymph.pcs$Sample, pattern="cDC")] <- "cDC"
+#lymph.pcs$CellType[grepl(lymph.pcs$Sample, pattern="Tonsil_[A-Z]_cDC")] <- "tDC"
+lymph.pcs$CellType[grepl(lymph.pcs$Sample, pattern="eTAC")] <- "eTAC"
+
+# get proportions of variance explained for each component
+var.explained <- ((lymph.pca$sdev**2)/sum((lymph.pca$sdev**2))) * 100
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(lymph.pcs, aes(x=PC1, y=PC2, fill=CellType)) +
+  geom_point(shape=21, size=4) +
+  theme_mike() +
+  scale_fill_manual(values=cell.cols) +
+  labs(x=paste("PC1 (", round(var.explained[1], 2), "%)"),
+       y=paste("PC2 (", round(var.explained[2], 2),"%)"))
+```
+
+From the two sets of cDCs (tDCs are the latest tonsil derived cDCs), the major separation is between the mature DCs and eTACs.  The second component (y-axis) separates the two different cDCs, this is most likely due to either a) different donors, or b) different sequencing experiments, i.e. dissociation, processing, library prep, etc on different days/times.
+
+UPDATE: only includes most recent tonsil cDCs.
+
+## Comparison to other human DCs
+
+From the single cell RNA sequencing, the pseudotime indicated that the _AIRE_ expressing cells were a transient population during DC maturation.  Ideally we could compare these cells to a time series experiment (_in vitro_ or _in vivo_) of DC maturation, which would give us an idea of where they are best placed during this process.
+
+I have obtained public data from a [single unpublished experiment](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi) of human monocyte derived DCs stimulated with LPS, C5a and/or an MSK inhibitor.  Of interest in particular are the immature and LPS stimulated cDCs.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+gse101396 <- read.table("~/Dropbox/ETACS/human_etacs/GSE101396_readcounts.txt",
+                        h=TRUE, sep="\t", stringsAsFactors=FALSE)
+stimdc.counts <- gse101396[, 2:24]
+rownames(stimdc.counts) <- gse101396$ensembl_gene_id
+
+# meta-data is from the GEO series matrix file
+gse101396.series <- read.table("~/Dropbox/ETACS/human_etacs/GSE101396_sample_matrix.tsv",
+                               h=FALSE, sep="\t", stringsAsFactors=FALSE)
+gse101396.meta <- t(gse101396.series)
+colnames(gse101396.meta) <- gsub(gse101396.meta[1, ], pattern="!", replacement="")
+gse101396.meta <- gse101396.meta[-1, ]
+select.cols <- grepl(colnames(gse101396.meta), pattern="Sample_characteristics_ch1")
+stub.meta <- as.data.frame(gse101396.meta[, select.cols])
+colnames(stub.meta) <- c("Derived_cell", "Stimulation", "Donor")
+stub.meta$Sample <- paste0("X", unlist(lapply(strsplit(gse101396.meta[, "Sample_description"], split="_", fixed=T),
+                                              FUN=function(X) paste(X[1:7], collapse="_"))))
+stub.meta$Donor <- gsub(stub.meta$Donor, pattern="donor: ", replacement="")
+
+stub.meta$Stimulation <- gsub(stub.meta$Stimulation, pattern="stimulation: ", replacement="")
+stub.meta$Stimulation <- gsub(stub.meta$Stimulation, pattern=" ", replacement="_")
+stub.meta$Stimulation <- gsub(stub.meta$Stimulation, pattern="\\+", replacement="pl")
+stub.meta$Stimulation <- gsub(stub.meta$Stimulation, pattern="/", replacement="per")
+stub.meta$Stimulation <- gsub(stub.meta$Stimulation, pattern="-", replacement=".")
+keep.samp <- stub.meta$Sample[stub.meta$Stimulation %in% c("no_stimulation", "50ngperml_LPS")]
+
+nz <- rowSums(stimdc.counts[, keep.samp]) > 3
+stimDC.nz <- stimdc.counts[nz, keep.samp]
+name.split <- strsplit(colnames(stimDC.nz), fixed=T, split="_")
+
+stimDC.meta <- data.frame(cbind(colnames(stimDC.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[4]))),
+                                unlist(lapply(name.split, FUN=function(X) paste0(X[5]))),
+                              c("stimDC", "stimDC", "stimDC")))
+colnames(stimDC.meta) <- c("Sample", "Donor", "Replicate", "CellType")
+rownames(stimDC.meta) <- stimDC.meta$Sample
+stimDC.meta <- merge(stub.meta, stimDC.meta, by=c('Sample', "Donor"))
+stimDC.meta <- stimDC.meta[stimDC.meta$Sample %in% keep.samp, ]
+stimDC.meta$Stimulation[stimDC.meta$Stimulation == "50ngperml_LPS"] <- "moDC.LPS"
+stimDC.meta$Stimulation[stimDC.meta$Stimulation == "no_stimulation"] <- "moDC.Unstim"
+stimDC.meta$CellType <- stimDC.meta$Stimulation
+
+dse <- DESeqDataSetFromMatrix(stimDC.nz,
+                              colData=stimDC.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+stimDC.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+stimDC.norm$gene_id <- rownames(stimDC.norm)
+```
+
+Let's look at how these data look before combining them with the other cDCs and eTACs.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+stimDC.pca <- prcomp(t(stimDC.norm[, 1:(dim(stimDC.norm)[2]-1)]), scale=TRUE, center=TRUE)
+stimDC.pcs <- as.data.frame(stimDC.pca$x)
+colnames(stimDC.pcs) <- paste0("PC", 1:dim(stimDC.pcs)[2])
+stimDC.pcs$Sample <- colnames(stimDC.norm[, 1:(dim(stimDC.norm)[2]-1)])
+stimDC.merge <- merge(stimDC.pcs, stimDC.meta, by='Sample')
+
+# get proportions of variance explained for each component
+var.explained <- ((stimDC.pca$sdev**2)/sum((stimDC.pca$sdev**2))) * 100
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(stimDC.merge, aes(x=PC1, y=PC2, fill=Stimulation)) +
+  geom_point(shape=21, size=4) +
+  theme_mike() +
+  scale_fill_manual(values=stim.cols) +
+  labs(x=paste("PC1 (", round(var.explained[1], 2), "%)"),
+       y=paste("PC2 (", round(var.explained[2], 2),"%)")) +
+  guides(fill=guide_legend(ncol=2)) +
+  theme(legend.text=element_text(size=10), legend.title=element_text(size=10))
+```
+
+The principal difference in these data are between the stimulated and unstimulated cells.  The addition of exogenous C5a doesn't seem to have any particular effect.  I'll now combine these together with the cDCs and eTACS.  I can do this either by projecting the data into another space, i.e. cDCs and eTACS into stimulated DCs, or try to remove the major experimental batch differences.
+
+UPDATE: I'll only use the no_stimulation and LPS stimulated samples.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+all.data$gene_id <- rownames(all.data)
+all.dcs <- Reduce(x=list("cDC"=all.data,
+                         "stimDC"=stimDC.norm),
+                   f=function(x, y) merge(x, y, by='gene_id'))
+rownames(all.dcs) <- all.dcs$gene_id
+all.dcs <- all.dcs[, -1]
+
+# don't include the mTECs for PCA, they will be very different
+DC.pca <- prcomp(t(all.dcs[, !grepl(colnames(all.dcs), pattern="mTEC")]), scale=TRUE, center=TRUE)
+DC.pcs <- as.data.frame(DC.pca$x)
+colnames(DC.pcs) <- paste0("PC", 1:dim(DC.pcs)[2])
+DC.pcs$Sample <- colnames(all.dcs[, !grepl(colnames(all.dcs), pattern="mTEC")])
+DC.pcs$CellType <- ""
+DC.pcs$CellType[grepl(DC.pcs$Sample, pattern="cDC")] <- "cDC"
+#DC.pcs$CellType[grepl(DC.pcs$Sample, pattern="Tonsil_[A-Z]_cDC")] <- "tDC"
+DC.pcs$CellType[grepl(DC.pcs$Sample, pattern="eTAC")] <- "eTAC"
+DC.pcs$CellType[grepl(DC.pcs$Sample, pattern="Donor")] <- "stimDC"
+DC.pcs[stimDC.meta$Sample[stimDC.meta$CellType == "moDC.LPS"], ]$CellType <- "moDC.LPS"
+DC.pcs[stimDC.meta$Sample[stimDC.meta$CellType == "moDC.Unstim"], ]$CellType <- "moDC.Unstim"
+
+# add a batch variable
+DC.pcs$Batch <- ""
+DC.pcs$Batch[DC.pcs$CellType %in% c("cDC", "tDC", "eTAC")] <- "Tonsil1"
+#DC.pcs$Batch[DC.pcs$CellType %in% c("cDC")] <- "Tonsil2"
+DC.pcs$Batch[DC.pcs$CellType %in% c("stimDC")] <- "Invitro"
+
+# get proportions of variance explained for each component
+var.explained <- ((DC.pca$sdev**2)/sum((DC.pca$sdev**2))) * 100
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(DC.pcs, aes(x=PC1, y=PC2, fill=CellType)) +
+  geom_point(shape=21, size=4) +
+  theme_mike() +
+  scale_fill_manual(values=stim.cols) +
+  labs(x=paste("PC1 (", round(var.explained[1], 2), "%)"),
+       y=paste("PC2 (", round(var.explained[2], 2),"%)")) +
+  guides(fill=guide_legend(ncol=2)) +
+  theme(legend.text=element_text(size=10), legend.title=element_text(size=10))
+```
+
+As expected, the differences between the experiments dominate.  I will instead estimate the unwanted experimental variation with surrogate variable analysis and regression out the effect before, I run the PCA again.
+
+### Removing unwanted variation with surrogate variable analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+batch <- DC.pcs$Batch
+mod0 <- model.matrix( ~ 1, data=DC.pcs)
+
+DC.adjusted <- ComBat(dat=all.dcs[, !grepl(colnames(all.dcs), pattern="mTEC")],
+                      batch=batch, mod=mod0)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ruv.exp.pca <- prcomp(t(DC.adjusted), scale=TRUE, center=TRUE)
+ruv.exp.pcs <- as.data.frame(ruv.exp.pca$x)
+
+ruv.exp.pcs$Sample <- rownames(ruv.exp.pcs)
+ruv.exp.merge <- merge(ruv.exp.pcs, DC.pcs[, c("Sample", "CellType")], by='Sample')
+
+ruv.exp.vars <- (ruv.exp.pca$sdev^2)/sum((ruv.exp.pca$sdev^2))
+
+var.exp <- 0
+q <- 1
+while(var.exp < 0.5){
+  var.exp <- var.exp + ruv.exp.vars[q]
+  q <- q + 1
+}
+
+plot(round(ruv.exp.vars*100, 2), xlab="Principal component", ylab="% variance explained")
+abline(v=q, col='purple', lty=2)
+```
+
+The first 3 components now estimate > 50% of the variation, rather than a single dominant effect.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# merge all meta data together
+lymph.meta <- lymph.pcs[, c("Sample", "CellType")]
+lymph.meta$Donor <- unlist(lapply(strsplit(as.character(lymph.meta$Sample), split="_", fixed=T),
+                                  FUN=function(Q) paste0(Q[5])))
+lymph.meta$Stimulation <- lymph.meta$CellType
+
+uber.meta <- do.call(rbind.data.frame, list("lymph"=lymph.meta,
+                                            "stim"=stimDC.merge[, c("Sample", "Donor",
+                                                                    "Stimulation", "CellType")]))
+ruv.merge <- merge(ruv.exp.merge, uber.meta, by=c('Sample', 'CellType'))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ruv.scat.pca <- ggplot(ruv.merge, aes(x=PC1, y=PC2, fill=Stimulation)) +
+  geom_point(size=5, shape=21, alpha=0.75) + theme_mike() +
+  scale_fill_manual(values=stim.cols) +
+  labs(x=paste("PC1 (",round(ruv.exp.vars[1]*100, 2), "% variance)"),
+       y=paste("PC2 (",round(ruv.exp.vars[2]*100, 2), "% variance)")) +
+  guides(fill=guide_legend(title="Cell Type", ncol=2)) +
+  theme(legend.title=element_text(size=12), legend.text=element_text(size=10)) +
+  theme(axis.title=element_text(size=16))
+
+ggsave(ruv.scat.pca,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/stimDC_eTACs-PCA.png",
+       height=4.75, width=5.75, dpi=300)
+
+ruv.scat.pca
+```
+
+We can see that the main axis of variation separates out the stimulated and unstimulated monocyte-derived DCs,.  The cells in Pink, Yellow and Purple are the cDCs and eTACs, which lie closer in the principal component space to the stimulated DCs than the unstimulated DCs.  Additionally the eTACs and cDCs are more similar to the stimulated DCs along the first component than the tonsil cDCs are, but not by much.  We can visualise these similarities in the principal component space in a heatmap and dendrogram.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=5.75, fig.width=8.75}
+# the first 12 components explain >95% of the variance.
+rownames(ruv.merge) <- ruv.merge$Sample
+ruv.cor <- cor(t(ruv.merge[, c(3:15)]), method="pearson")
+
+annot.df <- as.data.frame(ruv.merge[, c("Stimulation")])
+rownames(annot.df) <- rownames(ruv.merge)
+colnames(annot.df) <- "CellType"
+
+# stim.cols <- c("#386cb0", "#fdb462", "#7fc97f","#ef3b2c")
+# names(stim.cols) <- levels(annot.df$Stimulation)
+
+pheatmap(ruv.cor, show_rownames=FALSE, show_colnames=FALSE,
+         annotation_col=annot.df, annotation_row=annot.df,
+         annotation_colors=list("CellType"=stim.cols[!grepl(names(stim.cols),
+                                                               pattern="(mTEC)|(stimDC)")]),
+         filename="~/Dropbox/Reports_eTAC/ms_figure_panels/stimDC_eTACS-heatmap.png",
+         width=5.75, height=4.75, res=300)
+```
+
+From this heatmap constructed from the first 12 PCs (these explain ~95% of the total variation), the tonsil cDCs from one donor mostly sit together with the unstimulated monocyte-derived DCs.  The eTACs (purple) lie in their own distinct cluster, but importantly in a cluster that is more similar to the various _in vitro_ LPS stimulated DCs than they are to either the tonsil cDCs or the unstimulated monocyte-derived DCs.  Note that the _in vitro_ stimulated cells with LPS with other compounds/reagents are dominated by the LPS stimulation.
+
+Out of curiousity we can also see if there is any _AIRE_ expression in the stimulated DCs.  We can also include the mTECs as these are our gold standard for comparison of _AIRE_ expression.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+mtec.meta$Batch <- "Tonsil"
+rownames(mtec.meta) <- mtec.meta$Sample
+
+uber.meta$Batch <- ""
+uber.meta$Batch[uber.meta$CellType %in% c("cDC", "tDC", "eTAC")] <- "Tonsil"
+uber.meta$Batch[uber.meta$CellType %in% c("stimDC")] <- "Invitro"
+
+all.meta <- do.call(rbind.data.frame, list("lymph"=uber.meta, "thymus"=mtec.meta))
+
+batch <- all.meta$Batch
+mod0 <- model.matrix( ~ 1, data=all.meta)
+
+all.adjusted <- ComBat(dat=all.dcs,
+                      batch=batch, mod=mod0)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+aire <- "ENSG00000160224"
+
+aire.exprs <- as.data.frame(t(all.adjusted[aire, ]))
+colnames(aire.exprs) <- "Aire"
+aire.exprs$Sample <- rownames(aire.exprs)
+
+aire.merge <- merge(aire.exprs, all.meta, by='Sample')
+
+aire.p <- ggplot(aire.merge, aes(x=Stimulation, y=Aire, fill=Stimulation)) +
+  geom_jitter(position=position_jitterdodge(jitter.width=0.5), shape=21, size=3) + 
+  theme_mike() +
+  scale_fill_manual(values=stim.cols) +
+  labs(x="Phenotype", y=expression(paste("Log"[2], " Aire Expression"))) +
+  theme(legend.text=element_text(size=10)) +
+  guides(fill=guide_legend(title='Phenotype', ncol=2)) +
+  theme(axis.text.x=element_blank(), legend.title=element_text(size=12),
+        legend.text=element_text(size=10), axis.title=element_text(size=12, face='plain'))
+
+aire.p
+```
+
+The lack of expression in the mTECs is a bit concerning, perhaps these are post-_AIRE_ mTECs?  What was the gating phenotype from the human thymus samples?  Some of the _in vitro_ stimulated DCs have a non-zero expression of _AIRE_, which might indicate that it is induced during DC maturation and/or activation.  We know that in mice the post-_AIRE_ mTECs express the widest variety of TRAs, so we can still look at the TRA expression profile of these different cells.  If there is any promiscuous gene expression then it would be manifested here.
+
+### TRA expression profiles
+
+For this comparison to be completely valid, we need to include some peripheral tissues as controls.  I'll use a few samples from the GTEx project on liver, kidney, pancreas and brain cortex.  It is also worth noting that if there are uneven numbers of samples between each cell type, this might inadvertently give the impression of more genes TRAs expressed than tissues/cell types with fewer samples.  For that reason I will select 3 samples from each of the DCs, eTACs, as there are only 3 mTEC samples.
+
+The differences in sequencing depth may result in different numbers of genes detected per RNA-seq library.  Consequently I have downsampled all of mTEC, eTAC and cDC libraries down to __~20 million mapped reads__.  Any differences in the proportions of TRAs detected should therefore be due to differences between samples rather than detection sensitivity.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# randomly sample 3 individuals from liver, kidney, pancreas and cortex
+set.seed(42)
+liver <- read.table("~/Dropbox/GTEx/Liver_counts.tsv.gz",
+                    sep="\t", h=TRUE, stringsAsFactors=FALSE)
+rownames(liver) <- liver$Name
+liver.samp <- sample(colnames(liver)[2:dim(liver)[2]], size=3)
+liver.sub <- liver[, liver.samp]
+
+kidney <- read.table("~/Dropbox/GTEx/Kidney_counts.tsv.gz",
+                     sep="\t", h=TRUE, stringsAsFactors=FALSE)
+rownames(kidney) <- kidney$Name
+kidney.samp <- sample(colnames(kidney)[2:dim(kidney)[2]], size=3)
+kidney.sub <- kidney[, kidney.samp]
+
+pancreas <- read.table("~/Dropbox/GTEx/Pancreas_counts.tsv.gz",
+                       sep="\t", h=TRUE, stringsAsFactors=FALSE)
+rownames(pancreas) <- pancreas$Name
+pancreas.samp <- sample(colnames(pancreas)[2:dim(pancreas)[2]], size=3)
+pancreas.sub <- pancreas[, pancreas.samp]
+
+cortex <- read.table("~/Dropbox/GTEx/Cortex_counts.tsv.gz",
+                     sep="\t", h=TRUE, stringsAsFactors=FALSE)
+rownames(cortex) <- cortex$Name
+cortex.samp <- sample(colnames(cortex)[2:dim(cortex)[2]], size=3)
+cortex.sub <- cortex[, cortex.samp]
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+counts.down <- read.table("~/Dropbox/ETACS/Downsample_featueCounts.tsv", sep="\t",
+                          h=TRUE, stringsAsFactors=FALSE)
+# fix the column headers
+colnames(counts.down) <- unlist(lapply(strsplit(colnames(counts.down), split=".", fixed=T),
+                                       FUN=function(X) paste0(X[1])))
+rownames(counts.down) <- counts.down$Geneid
+counts.down <- counts.down[, 1:(dim(counts.down)[2]-1)]
+
+# normalise each
+nz <- rowSums(counts.down) > 1
+counts.nz <- counts.down[nz, ]
+name.split <- strsplit(colnames(counts.nz), fixed=T, split="_")
+
+counts.meta <- data.frame(cbind(colnames(counts.nz),
+                                unlist(lapply(name.split, FUN=function(X) paste0(X[1]))),
+                                c("tDC", "mTEC", "cDC", "eTAC", "eTAC", "tDC", "cDC", "tDC",
+                                  "beTAC", "eTAC", "eTAC", "beTAC", "cDC", "cDC", "mTEC", "beTAC", "mTEC")))
+colnames(counts.meta) <- c("Sample", "Donor", "CellType")
+rownames(counts.meta) <- counts.meta$Sample
+counts.meta$Batch <- "Downsample"
+counts.meta$Stimulation <- "None"
+
+dse <- DESeqDataSetFromMatrix(counts.nz, colData=counts.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+counts.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+counts.norm$gene_id <- rownames(counts.norm)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# normalise each
+nz <- rowSums(liver.sub) > 1
+liver.nz <- liver.sub[nz, ]
+name.split <- strsplit(colnames(liver.nz), fixed=T, split=".")
+
+liver.meta <- data.frame(cbind(colnames(liver.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("Liver", "Liver", "Liver")))
+colnames(liver.meta) <- c("Sample", "Donor", "CellType")
+rownames(liver.meta) <- liver.meta$Sample
+liver.meta$Batch <- "GTEx"
+liver.meta$Stimulation <- "None"
+
+dse <- DESeqDataSetFromMatrix(liver.nz, colData=liver.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+liver.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+liver.norm$gene_id <- rownames(liver.norm)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# normalise each
+nz <- rowSums(kidney.sub) > 1
+kidney.nz <- kidney.sub[nz, ]
+name.split <- strsplit(colnames(kidney.nz), fixed=T, split=".")
+
+kidney.meta <- data.frame(cbind(colnames(kidney.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("Kidney", "Kidney", "Kidney")))
+colnames(kidney.meta) <- c("Sample", "Donor", "CellType")
+rownames(kidney.meta) <- kidney.meta$Sample
+kidney.meta$Batch <- "GTEx"
+kidney.meta$Stimulation <- "None"
+
+dse <- DESeqDataSetFromMatrix(kidney.nz, colData=kidney.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+kidney.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+kidney.norm$gene_id <- rownames(kidney.norm)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# normalise each
+nz <- rowSums(pancreas.sub) > 1
+pancreas.nz <- pancreas.sub[nz, ]
+name.split <- strsplit(colnames(pancreas.nz), fixed=T, split=".")
+
+pancreas.meta <- data.frame(cbind(colnames(pancreas.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("Pancreas", "Pancreas", "Pancreas")))
+colnames(pancreas.meta) <- c("Sample", "Donor", "CellType")
+rownames(pancreas.meta) <- pancreas.meta$Sample
+pancreas.meta$Batch <- "GTEx"
+pancreas.meta$Stimulation <- "None"
+
+dse <- DESeqDataSetFromMatrix(pancreas.nz, colData=pancreas.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+pancreas.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+pancreas.norm$gene_id <- rownames(pancreas.norm)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# normalise each
+nz <- rowSums(cortex.sub) > 1
+cortex.nz <- cortex.sub[nz, ]
+name.split <- strsplit(colnames(cortex.nz), fixed=T, split=".")
+
+cortex.meta <- data.frame(cbind(colnames(cortex.nz), unlist(lapply(name.split, FUN=function(X) paste0(X[2]))),
+                              c("Cortex", "Cortex", "Cortex")))
+colnames(cortex.meta) <- c("Sample", "Donor", "CellType")
+rownames(cortex.meta) <- cortex.meta$Sample
+cortex.meta$Batch <- "GTEx"
+cortex.meta$Stimulation <- "None"
+
+dse <- DESeqDataSetFromMatrix(cortex.nz, colData=cortex.meta, design=~1)
+dse <- estimateSizeFactors(dse)
+cortex.norm <- data.frame(log2(counts(dse, normalized=TRUE) + 1))
+cortex.norm$gene_id <- rownames(cortex.norm)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# need to deliberately go back and re-filter to retain likely pGE TRAs.
+all.data <- Reduce(x=list("Downsample"=counts.norm,
+                          "Liver"=liver.norm, "Pancreas"=pancreas.norm,
+                          "Kidney"=kidney.norm, "Cortex"=cortex.norm),
+                   f=function(x, y) merge(x, y, by='gene_id', all=TRUE))
+rownames(all.data) <- all.data$gene_id
+all.data <- all.data[, -1]
+all.data[is.na(all.data)] <- 0
+
+# remove all zero genes
+gene_sparse <- apply(all.data == 0, 1, sum)/dim(all.data)[2]
+all.data <- all.data[gene_sparse <= 0.9 ,]
+
+all.data$gene_id <- rownames(all.data)
+# all.dcs <- Reduce(x=list("Downsample"=all.data,
+#                          "stimDC"=stimDC.norm),
+#                    f=function(x, y) merge(x, y, by='gene_id'))
+
+rownames(all.data) <- all.data$gene_id
+all.data <- all.data[, -(dim(all.data)[2])]
+
+mtec.meta$Batch <- "Tonsil"
+rownames(mtec.meta) <- mtec.meta$Sample
+
+uber.meta$Batch <- ""
+uber.meta$Batch[uber.meta$CellType %in% c("cDC", "tDC", "eTAC")] <- "Tonsil"
+uber.meta$Batch[uber.meta$CellType %in% c("stimDC")] <- "Invitro"
+
+all.meta <- do.call(rbind.data.frame, list("lymph"=counts.meta,
+                                           "Liver"=liver.meta, "Pancreas"=pancreas.meta,
+                                           "Kidney"=kidney.meta, "Cortex"=cortex.meta))
+all.meta$Sample <- as.character(all.meta$Sample)
+
+batch <- all.meta$Batch
+mod0 <- model.matrix( ~ 1, data=all.meta)
+
+all.adjusted <- ComBat(dat=all.data,
+                      batch=batch, mod=mod0)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+tra.df <- read.table("~/Dropbox/fantom5/hg19/Human-Tau_TRA_level3.tsv",
+                     h=T, sep="\t", stringsAsFactors=F)
+
+tra.quants <- quantile(tra.df$tau, probs=c(0.25, 0.75), na.rm=TRUE)
+tra.df$GeneGroup <- "Misc"
+tra.df$GeneGroup[tra.df$tau <= tra.quants[1]] <- "Constituitive"
+tra.df$GeneGroup[tra.df$tau > tra.quants[2]] <- "Tissue-Restricted"
+
+all.adjusted$gene_id <- rownames(all.adjusted)
+fantom.exprs <- merge(all.adjusted, tra.df[, (dim(tra.df)[2]-5):(dim(tra.df)[2])],
+                      by.x='gene_id', by.y='ensembl.gene')
+fantom.cols <- colnames(tra.df[, (dim(tra.df)[2]-5):(dim(tra.df)[2])])[-2]
+fant.melt <- melt(fantom.exprs, id.vars=c(fantom.cols, 'gene_id'))
+```
+
+What is the overlap in the TRAs that are expressed in each of the mTEC, eTACs and cDCs?  Will also need some peripheral tissues to act as negative controls here, e.g. liver, pancreas, brain, etc.
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+fantom.merge <- merge(fant.melt, all.meta, by.x='variable', by.y='Sample', all=TRUE)
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=4.75, fig.width=4.75}
+grid.newpage()
+mtec.tras <- unique(fantom.merge$gene_id[fantom.merge$value > 3 &
+                                           fantom.merge$CellType %in% c("mTEC") &
+                                           fantom.merge$GeneGroup == "Tissue-Restricted"])
+cdc.tras <- unique(fantom.merge$gene_id[fantom.merge$value > 3 & 
+                                          fantom.merge$CellType %in% c("cDC") &
+                                          fantom.merge$GeneGroup == "Tissue-Restricted"])
+bulk_etac.tras <- unique(fantom.merge$gene_id[fantom.merge$value > 3 &
+                                                fantom.merge$CellType %in% c("eTAC") &
+                                                fantom.merge$GeneGroup == "Tissue-Restricted"])
+
+thway.venn <- draw.triple.venn(area1=length(mtec.tras),
+                              area2=length(cdc.tras),
+                              area3=length(bulk_etac.tras),
+                              n12=length(intersect(mtec.tras, cdc.tras)),
+                              n23=length(intersect(cdc.tras, bulk_etac.tras)),
+                              n13=length(intersect(mtec.tras, bulk_etac.tras)),
+                              n123=length(intersect(intersect(mtec.tras, cdc.tras), bulk_etac.tras)),
+                                category=c("mTEC", "cDC", "eTAC"),
+                                lwd=c(1, 1, 1), col=rep("black", 3),
+                                fill=cell.cols[c("mTEC", "cDC", "eTAC")], alpha=rep(0.4, 3),
+                                cat.pos=c(330, 30, 180), cat.just=list("mTEC"=c(0, 0),
+                                                                    "cDC"=c(0, 0),
+                                                                    "eTAC"=c(0, 0.5)),
+                              cat.cex=rep(1.5, 3), cat.fontface=rep("bold", 3),
+                              cat.fontfamily=rep("Helvetica", 3),
+                              fontfamily=rep("Helvetica", 7), fontface=rep("bold", 7),
+                              cex=rep(1.5, 7))
+png("~/Dropbox/Reports_eTAC/ms_figure_panels/eTAC_vs_mTEC-TRAs_Venn.png",
+    height=8.5, width=8.5, res=300, units="in")
+grid.draw(thway.venn)
+dev.off()
+```
+
+I have recreated the figure in a previous report comparing the proportion of genes expressed in each cell group based on the tissue-restricted pattern of expression.  We can see that there is only a marginal difference in the number of TRAs expressed between cDCs and eTACs, particularly compared to the eTACs (though there is curiously a high number of overlapping genes specifically expressed in eTACs and mTECs).
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=5.5, fig.width=5.5}
+# this could be misleading where there are more samples in one cell type than another
+fantom.mtec <- fantom.merge[fantom.merge$CellType == "mTEC" & fantom.merge$value > 1,]
+fantom.mtec <- fantom.mtec[!duplicated(fantom.mtec$gene_id), ]
+
+fantom.cdc <- fantom.merge[fantom.merge$CellType == "cDC" & fantom.merge$value > 1,]
+fantom.cdc <- fantom.cdc[!duplicated(fantom.cdc$gene_id), ]
+
+fantom.etac <- fantom.merge[fantom.merge$CellType == "eTAC" & fantom.merge$value > 1,]
+fantom.etac <- fantom.etac[!duplicated(fantom.etac$gene_id), ]
+
+fantom.liver <- fantom.merge[fantom.merge$CellType == "Liver" & fantom.merge$value > 1,]
+fantom.liver <- fantom.liver[!duplicated(fantom.liver$gene_id), ]
+
+fantom.pancreas <- fantom.merge[fantom.merge$CellType == "Pancreas" & fantom.merge$value > 1,]
+fantom.pancreas <- fantom.pancreas[!duplicated(fantom.pancreas$gene_id), ]
+
+fantom.kidney <- fantom.merge[fantom.merge$CellType == "Kidney" & fantom.merge$value > 1,]
+fantom.kidney <- fantom.kidney[!duplicated(fantom.kidney$gene_id), ]
+
+fantom.cortex <- fantom.merge[fantom.merge$CellType == "Cortex" & fantom.merge$value > 1,]
+fantom.cortex <- fantom.cortex[!duplicated(fantom.cortex$gene_id), ]
+
+fantom.combine <- do.call(rbind.data.frame, list("mTEC"=fantom.mtec,
+                                                 "cDC"=fantom.cdc,
+                                                 "eTAC"=fantom.etac,
+                                                 "Liver"=fantom.liver,
+                                                 "Pancreas"=fantom.pancreas,
+                                                 "Kidney"=fantom.kidney,
+                                                 "Cortex"=fantom.cortex))
+# try plotting just the TRAs
+# need to calculate proportions within each cell type then just plot these
+cell.types <- unique(as.character(fantom.combine$CellType))
+fant.type.prop <- list()
+for(x in seq_along(cell.types)){
+  tpe <- cell.types[x]
+  tpe.melt <- fantom.combine[fantom.combine$CellType == tpe, ]
+  g.type.tab <- table(tpe.melt$GeneGroup[tpe.melt$value > 1])
+  g.type.props <- g.type.tab/sum(g.type.tab)
+  fant.type.prop[[tpe]] <- list("GeneGroup"=names(g.type.props),
+                                "Props"=g.type.props)
+}
+
+fantom.type.prop <- do.call(rbind.data.frame, fant.type.prop)
+fantom.type.prop$CellType <- as.factor(gsub(rownames(fantom.type.prop), pattern=".[0-9]+", replacement=""))
+
+pge.human <- ggplot(fantom.type.prop[fantom.type.prop$GeneGroup == "Tissue-Restricted", ],
+       aes(x=reorder(CellType, Props), y=Props, fill=GeneGroup)) +
+  geom_bar(stat='identity', colour='black', fill='darkgrey') + 
+  theme_mike() + theme(axis.text.x=element_text(angle=0)) +
+  guides(fill=guide_legend(size=12, ncol=1)) +
+  #scale_fill_Publication() +
+  labs(x="Cell Type", y="Percentage of Expressed Genes") +
+  coord_flip() + lims(y=c(0, 1))
+
+# pge.human <- ggplot(fantom.combine[fantom.combine$value > 1 & !is.na(fantom.combine$CellType) , ],
+#        aes(x=CellType, fill=GeneGroup)) +
+#   geom_bar(position='fill', colour='black', aes(y=..count../sum(..count..), fill=GeneGroup),
+#            data=fantom.combine[fantom.combine$value > 1 & !is.na(fantom.combine$CellType) &
+#                                  fantom.combine$GeneGroup == "Tissue-Restricted", ]) + 
+#   theme_mike() + theme(axis.text.x=element_text(angle=0)) +
+#   guides(fill=guide_legend(size=12, ncol=1)) +
+#   scale_fill_Publication() +
+#   labs(x="Cell Type", y="Percentage of Expressed Genes") +
+#   coord_flip()
+
+ggsave(pge.human,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/TRA_AllTissues-barchart.png",
+       width=6.25, height=6.75, dpi=300)
+
+pge.human
+```
+
+It is _very_ hard to discern the differences between the DCs and eTACS, but there are marginally more TRAs proportionally expressed in the eTACs.  Compared to the other peripheral tissues however there is much less differeence.  We can better visualise this based on the distribution of our tissue specificity index $\tau$.
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+tau.p <- ggplot(fantom.combine[fantom.combine$value > 1 &
+                               fantom.combine$CellType %in% c("cDC", "mTEC", "eTAC"), ],
+       aes(x=tau, colour=CellType)) +
+  geom_density() + theme_mike() +
+  scale_colour_manual(values=cell.cols) +
+  labs(x=expression(paste(tau, "-Index")), y="Density") +
+  guides(colour=FALSE)
+
+tau.cdf <- ggplot(fantom.combine[fantom.combine$value > 1 &
+                               fantom.combine$CellType %in% c("cDC", "mTEC", "eTAC"), ],
+       aes(x=tau, colour=CellType)) +
+  stat_ecdf() + theme_mike() +
+  scale_colour_manual(values=cell.cols) +
+  labs(x=expression(paste(tau, "-Index")), y="CDF") +
+  guides(colour=FALSE)
+
+tau_grid <- plot_grid(tau.p, tau.cdf)
+
+ggsave(tau.p,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Tau_density.png",
+       heigh=3.75, width=3.75, dpi=300)
+
+ggsave(tau_grid,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Tau_plots.png",
+       height=3.75, width=7.75, dpi=300)
+
+tau_grid
+```
+
+We can see the tendency for the mTECs to expression a greater proportion of genes with a higher $\tau$ compared to the other DCs.  Within the DCs and eTACs there is some variation, but we do not see any evidence of a shift towards the expression of more TRAs.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# is there actually any difference between cDCs and eTACs?
+ks.test(x=fantom.combine$tau[fantom.combine$value > 1 &
+                             fantom.combine$CellType == "eTAC"],
+        y=fantom.combine$tau[fantom.combine$value > 1 &
+                             fantom.combine$CellType == "cDC"])
+```
+
+There is a small difference between eTACs and cDCs with respect to the distribution of $\tau$-index.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# is there actually any difference between cDCs and eTACs?
+ks.test(x=fantom.combine$tau[fantom.combine$value > 1 &
+                             fantom.combine$CellType == "cDC"],
+        y=fantom.combine$tau[fantom.combine$value > 1 &
+                             fantom.combine$CellType == "mTEC"])
+```
+
+
+Using what we know about the patterns of expression of _AIRE_ in the mouse thymus, we can come to two conclusions:
+
+  1) Present expression of _AIRE_ does not indicate the presence of TRA expression, so just because the eTACs express _AIRE_ does not mean they are licensed to express TRAs in the same way that mTEC are.
+  2) Post-_AIRE_ expressing mTECs express the widest range of TRAs, thus post-_AIRE_ eTACs may exist that express many TRAs.
+  
+I would counter the second point that the eTACs we have observed are part of a maturation or activation process in response to an inflammatory/immunological stimulus.  Thus I would _not_ expect post-_AIRE_ eTACs to express more TRAs.  This is partially supported by the lack of any discernably promiscous gene expression in the LPS stimulated DCs which are the closest transcriptionally to the eTACs.  To counter this, we do not know whether the similarity in transcriptional state is _per se_ indicative of the eventual fate of the eTAC population.  Here we can invoke the single cell data, specifically the pseudotime results.  If we assume that the arrow of time runs in either direction, the eTACs (_CCR7_+, _AIRE_+) lie in between two other meta-stable states.  If post-_AIRE_ eTACs were licensed to express TRAs in the same way that mTECs do, then we would expect to see a burst or increase in TRA expression in the meta-stable states either side of the eTACs along the pseudotime trajectory.  We do not observe this, so I would conclude that these eTACs are not functionally licensed to express endogenous TRAs, and are a transient population present during DC maturation and/or activation.
+
+Of course, this raises the question, what does _AIRE_ do in these cells?  Arguably this is more interesting because it implies a role for _AIRE_ outside of promiscuous gene expression.
+
+## Similarity of eTACs, DCs and mTECs based on TRA expression
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+tra.exprs <- all.adjusted[rownames(all.adjusted) %in%
+                            tra.df$ensembl.gene[tra.df$GeneGroup == "Tissue-Restricted"], ]
+tra.exprs <- tra.exprs[, -(dim(tra.exprs)[2])]
+# remove the 0-rowsum genes and 0-variance genes
+nz <- rowSums(tra.exprs) != 0
+tra.exprs <- tra.exprs[nz, ]
+nv <- apply(tra.exprs, 1, var) != 0
+
+# don't include the moDC samples
+tra.exprs <- tra.exprs[nv, all.meta$Sample[all.meta$CellType %in% c("cDC", "eTAC", "mTEC")]]
+tra.cor <- cor(tra.exprs, method="pearson")
+
+annot.df <- as.data.frame(all.meta[all.meta$CellType %in% c("cDC", "eTAC", "mTEC"),
+                                   c("CellType")])
+rownames(annot.df) <- all.meta$Sample[all.meta$CellType %in% c("cDC", "eTAC", "mTEC")]
+colnames(annot.df) <- "CellType"
+
+pheatmap(tra.cor, show_rownames=FALSE, show_colnames=FALSE,
+         annotation_col=annot.df, annotation_row=annot.df,
+         annotation_colors=list("CellType"=stim.cols[c("mTEC", "cDC", "eTAC")]),
+         filename="~/Dropbox/Reports_eTAC/ms_figure_panels/mTEC_DC_eTAC-heatmap.png",
+         width=5.75, height=4.75)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+nv <- apply(tra.exprs, 1, var) != 0
+
+tra.pca <- prcomp(t(tra.exprs[nv, ]), scale=TRUE, center=TRUE)
+tra.pcs <- as.data.frame(tra.pca$x)
+tra.pcs$Sample <- rownames(tra.pcs)
+
+tra.merge <- merge(tra.pcs, all.meta, by='Sample')
+
+tra.exp.vars <- (tra.pca$sdev^2)/sum((tra.pca$sdev^2))
+
+tra.p <- ggplot(tra.merge, aes(x=PC1, y=PC2, fill=CellType)) +
+  geom_point(size=5, shape=21, alpha=0.75) + theme_mike() +
+  scale_fill_manual(values=cell.cols) +
+  labs(x=paste("PC1 (", round(tra.exp.vars[1]*100, 2),"% variance explained)"),
+       y=paste("PC2 (", round(tra.exp.vars[2]*100, 2),"% variance explained)"))
+
+ggsave(tra.p,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/mTEC_DC_eTAC-PCA.png",
+       width=5.25, height=4.75, dpi=300)
+
+tra.p
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ensembl <- useEnsembl(biomart='ensembl', dataset='hsapiens_gene_ensembl', GRCh=37)
+
+gene_symbol <- getBM(attributes=c('ensembl_gene_id', 'external_gene_name'),
+                     filters='ensembl_gene_id', mart=ensembl,
+                     values=rownames(all.adjusted))
+rownames(gene_symbol) <- gene_symbol$ensembl_gene_id
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.75, fig.height=3.75}
+tra.goi <- c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5", "SOX10", "GAD2", "TH", "CYP11A1")
+
+# get GOIs
+ensembl.tra <- gene_symbol$ensembl_gene_id[gene_symbol$external_gene_name %in% tra.goi]
+tra.goi.exprs <- as.data.frame(t(all.adjusted[ensembl.tra, 1:(dim(all.adjusted)[2]-1)]))
+colnames(tra.goi.exprs) <- gene_symbol[ensembl.tra, "external_gene_name"]
+
+# add in genes that are not expressed, with all 0 values
+for(i in seq_along(tra.goi)){
+  if(!tra.goi[i] %in% gene_symbol$external_gene_name){
+    tra <- tra.goi[i]
+    no.tra.exprs <- numeric(dim(tra.goi.exprs)[1])
+    tra.goi.exprs[, tra] <- no.tra.exprs
+  }
+}
+tra.goi.exprs$Sample <- rownames(tra.goi.exprs)
+
+tra.goi.merge <- merge(tra.goi.exprs, all.meta, by="Sample")
+tra.goi.melt <- melt(tra.goi.merge,
+                 id.vars=c(colnames(all.meta)))
+tra.goi.melt$value <- as.numeric(as.character(tra.goi.melt$value))
+tra.goi.melt$variable <- factor(tra.goi.melt$variable,
+                                levels=c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5",
+                                         "SOX10", "GAD2", "TH", "CYP11A1"),
+                                labels=c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5",
+                                         "SOX10", "GAD2", "TH", "CYP11A1"))
+
+# just compare the eTACs, cDCs and mTECs
+tra.by.state <- ggplot(tra.goi.melt[tra.goi.melt$CellType %in% c("cDC", "eTAC", "mTEC"), ],
+                       aes(x=variable, y=value, fill=CellType,
+                           group=CellType)) +
+  geom_jitter(shape=21, alpha=0.75, size=3,
+              position=position_jitterdodge()) +
+  theme_mike() +
+  scale_fill_manual(values=cell.cols) +
+  labs(x="Gene", y=expression(paste("log"[2], " Normalised Expression"))) +
+  guides(fill=FALSE) +
+  theme(axis.title=element_text(size=16, face="plain"),
+        axis.text.x=element_text(angle=90))
+
+ggsave(tra.by.state,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/BulkAire_TRAs_by_cluster.png",
+       height=3.75, width=6.75, dpi=300)
+
+tra.by.state
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

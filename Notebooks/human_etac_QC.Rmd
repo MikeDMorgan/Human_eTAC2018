@@ -1,0 +1,1129 @@
+---
+title: 'Human eTACs: QC and initial analysis'
+author: "Mike Morgan"
+output: html_document
+---
+
+## Introduction
+Extra-thymic Aire-expressing cells are lymph node resident cells, possibly of a myeloid lineage, that expressed Aire and are capable of endogenous expression of tissue-restricted antigens.  The working hypothesis is that the population of eTACs described in Gardner _et al_ (2008), which are EpCam+ stromal cells, are different to the cell population described in Gardner _et al_ (2011) which are EpCam-.  The initial description were Cd45-, however the latter article describes them as Cd45+, and thus are bone-marrow derived.
+
+Here we have human tonsil-derived eTACs (CD45+CD127+HLA-DR+EpCam+CD40+) from two donors.  Cells were sorted in Amsterdam by Joanna Fergusson into a 384 well plate containing cell lysis buffer, prior to shipping to Oxford, and then finally the Wellcome Trust Sanger Institute for single cell library preparation and sequencing.  Sequencing data were passed through initial QC and found to be of generally good quality, with high per-base sequence quality and the majority of reads were properly paired.  Sequence data were aligned to the human reference genome (hg38), which included reference sequences for ERCC92 spike in RNA transcripts.  Sequence alignment rates varied from 0% to >98%, concordant with other single cell data sets.  Gene expression was quantified by read counts overlapping genes, thus expression values should be interpreted on a log$_2$ counts scale.  Some cell libraries exhibited low numbers of protein-coding genes expressed (usually a sign of poor quality cells) and high ribosomal RNAs.  
+
+This document lays out my QC findings and initial analysis of human eTACs.
+
+## Quality control
+Reading the counts data and meta-data in to R environment; these are stored in a single SCESet object `sce`.  The first thing we want to look at is the sequencing depth per cell, and how this is distributed across the plate.  If there are any systematic effects during cell sorting this will show up as differences between plate rows/columns.
+
+
+```{r, fig.height=7.5, fig.width=7.5, echo=FALSE}
+suppressPackageStartupMessages(source("~/Dropbox/R_sessions/Normalisation_scripts/human_eTAC_normalisation.R"))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(pheatmap))
+suppressPackageStartupMessages(library(lsa))
+suppressPackageStartupMessages(library(ggrepel))
+
+row.p <- plotPhenoData(sce, aes(y=log10_total_counts,
+                        x=PlateRow,
+                        colour=PlateRow))
+col.p <- plotPhenoData(sce, aes(y=log10_total_counts,
+                        x=PlateColumn,
+                        colour=PlateColumn))
+plot_grid(row.p, col.p,
+          labels=c("Library size by plate row", "Library size by plate column"),
+          nrow=2)
+```
+
+Comfortingly there are no systematic differences in total library size between either plate rows or plate columns.  This means there shouldn't be any systematic differences between donors due to the sorting as well; let's just check that is the case for peace of mind.  There are some very small libraries, which will have to be removed; probably any library with < 100,000 reads represents a poor quality cell.
+
+```{r, echo=FALSE}
+plot(sce,
+     colour_by="SampleType", nfeatures=500, exprs_values="counts")
+```
+
+These plots show the proportion of sequencing coverage distributed across detected genes.  If a cell/library is dominated by just a few genes this is generally indicative of poor quality.  We can see this pattern on two of the blue lines on the left from the empty wells; any sequencing reads in these libraries come from just a few genes, and are probably just cross-contamination of reads that map poorly to the genome.  There are definitely some cells (green lines) that also occupy that space where poor quality cells are expected.
+
+```{r, echo=FALSE}
+donor.plot <- plotPhenoData(sce, aes(x=Donor,
+                       y=log10_total_counts,
+                       colour=Donor)) +
+  geom_jitter(alpha=0.6, size=3) +
+  scale_colour_manual(values=donor.cols <- c("darkgreen", "purple")) +
+  scale_fill_manual(values=donor.cols <- c("darkgreen", "purple")) +
+  labs(y=expression(paste("log"[10], " Total Counts"))) +
+  theme(axis.title=element_text(size=16),
+        axis.text=element_text(size=12))
+
+ggsave(donor.plot,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/SuppFig_violin_by_donorLib.png",
+       width=5.75, height=3.75, dpi=300)
+donor.plot
+```
+
+Excellent, there are no systematic differences between the two donors, this bodes well so far.  Now let's take a look at the spike-in transcripts and other gene-based features of the data.  We'll also take a look at a few standard QC metrics for single cell data.
+
+
+```{r, echo=FALSE}
+plotPhenoData(sce, aes(x=n_detected_feature_controls_Spikes,
+                       y=exprs_feature_controls,
+                       colour=Donor))
+```
+
+Hmm, there should be more spike in transcripts than that present in each sequencing library.  We'd normally expect ~30-60/92 to be picked up by the sequencing, here we see less than 5 in the majority of cells.  I think there might be a problem with the spike ins.  This is not an insurmountable problem, but I'll have to go back to the single cell facility and enquire about the spike in concentration they used for this experiment.
+
+Let's also check the empty wells and multi-cell controls.
+
+```{r, echo=FALSE, fig.height=5.5}
+plotPhenoData(sce, aes(x=SampleType,
+                       y=log10_total_counts,
+                       colour=SampleType))
+```
+
+Okay, so there are quite a fews reads in two of the empty wells, we might expect some anyway from contamination. As long as these aren't meaningful transcripts we are fine, otherwise it might indicate cells were sorted into these wells accidentally.  The multi-cell well has quite a low yield, maybe the library prep failed for this sample.  Let's see if the empty wells are dominated by just a few genes.
+
+```{r, echo=FALSE}
+p.empty <- plotQC(sce[, sce$SampleType == "Empty"], type="highest-expression")
+p.cells <- plotQC(sce[, sce$SampleType != "Empty"], type="highest-expression")
+
+plot_grid(p.empty, p.cells,
+          ncol=2)
+```
+
+Expression in the empty wells (left plot) is dominated by a single gene (ENSG000000156508), which corresponds to Eukaryote translation elongation factor 1 alpha 1, where as the non-empty wells are marginally dominated by CD74 (ENSGE00000019582) and $\beta$-actin (ENSG00000075624).  It is also worth noting that none of the dominant genes here are the spike in transcripts, which we often observe in poor quality cells.  This indicates that there _is_ a problem with the spike in transcripts, most likely they were completely omitted from this experiment!
+
+Finally let's take a look at the number of genes detected in each cell, this is generally a good indicator of cell quality.  It also allows us to check there are no systematic differences between cells from the two donors.
+
+```{r, echo=FALSE}
+plotPhenoData(sce[, sce$SampleType != "Empty"],
+              aes(x=Donor,
+                  y=total_features, 
+                  colour=Donor))
+```
+
+There seem to be a couple of cells from each donor with an extremely high number of genes detected.  Are these doublet cells, or is this part of their biology?  We wouldn't expect any doublet cells from the flow cytomtery sorting, and these cells are not the multi-cell sample (A1).  These can be flagged for later, and kept an eye one.
+
+Let's set up some QC filters:
+
+* Total library size < 100k
+* Number of genes expressed < 1000
+* Gene sparsity > 95% (i.e. only keep genes expressed in _at least_ 5% of cells)
+* Cell sparsity > 95%
+
+```{r, echo=FALSE}
+sce$filter_on_total_counts <- sce$log10_total_counts < 5
+sce$filter_on_total_features <- sce$total_features < 1000
+dim(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features & sce$SampleType == "Single-cell"])
+
+gene_sparsity <- apply(counts(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features]) == 0, 
+                       MARGIN = 1,
+                       sum)/dim(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features])[2]
+
+cell_sparsity <- apply(counts(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features]) == 0, 
+                       MARGIN = 2,
+                       sum)/dim(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features])[1]
+
+```
+
+```{r, echo=FALSE}
+print(median(gene_sparsity))
+par(mfrow=c(2, 1))
+hist(gene_sparsity, 100)
+hist(cell_sparsity, 100, xlim=c(0, 1))
+abline(v=0.95, lty=2, col='purple')
+```
+
+The median number of 0's across all genes is 93%, anything below 95% is generally acceptable for these type of single cell data.  The median sparsity (0's) for cells is lower thanks to the QC filtering on number of genes expressed and total library size.  We'd normally remove any remaining cells with $\geq$ 95% sparsity (purple dashed line) to make sure we have just the best quality data before normalisation, however, there aren't any! (This is a good thing)
+
+So we've got __217__ cells that pass QC; the multi-cell control failed our QC steps unfortunately, but this isn't crucial to our analysis.
+
+## Normalisation
+
+First I'll remove the poor quality cells, and genes with high sparsity.  In the absence of ERCC spike in transcripts we'll use the deconvolution normalisation method from Lun _et al_.
+```{r, echo=FALSE}
+qc.counts <- counts(sce[, !sce$filter_on_total_counts & !sce$filter_on_total_features & sce$SampleType == "Single-cell"])
+#qc.counts <- qc.counts[!grepl(rownames(qc.counts), pattern="ERCC"), ]
+
+gene_sparsity <- apply(qc.counts == 0, MARGIN=1, sum)/dim(qc.counts)[2]
+# only set to 0.99 to get EpCam, keep at 0.95 otherwise
+#keep_genes <- gene_sparsity < 0.99
+keep_genes <- gene_sparsity < 0.95
+qc.nz <- qc.counts[keep_genes, ]
+dim(qc.nz)
+```
+
+So we're keeping > 10,000 genes, that's pretty good for a single cell data set!  We need to check that the normalisation factors for each cell are not zero, or close to zero.  If they are then we need to do some more stringent QC.
+
+```{r, echo=FALSE}
+pd.qc <- new("AnnotatedDataFrame", etacs.meta[colnames(qc.nz), ])
+qc.sce <- newSCESet(countData=qc.nz, phenoData=pd.qc)
+
+clusters <- quickCluster(qc.sce, min.size=55, get.spikes=FALSE)
+qc.sce <- computeSumFactors(qc.sce, sizes=c(20, 22, 25, 27), positive=T,
+                         assay.type='counts', clusters=clusters)
+summary(sizeFactors((qc.sce)))
+```
+
+
+```{r, fig.height=6.5, echo=FALSE}
+par(mfrow=c(2, 1))
+hist(sizeFactors((qc.sce)), breaks=100, main="Histogram of cell size factors")
+abline(v=0.1, lty=2, col="red")
+plot(sizeFactors((qc.sce)), ylab="Size factors", xlab="Cell")
+abline(h=0.1, lty=2, col='red')
+```
+
+There are 3 cells with small size factors (~0.1) which might cause problems later, if they do we can come back and remove them.  For now, we'll use these size factors to normalise the expression counts to account for the differences in sequencing depth between cells.  This means that expression values will be comparable between cells.
+
+```{r, echo=FALSE}
+qc.sce <- normalize(qc.sce)
+etacs.qc <- as.data.frame(exprs(qc.sce))
+```
+
+## Sanity checking
+Now we have a matrix of normalised gene expression we can do some sanity checks and ask a few questions of the data.  Firstly, can we detect the genes expressed in mouse eTACs, and the markers used to sort these human cells?
+
+Let's look for some marker genes; I'm not sure what the HLA types of these donors are, but perhaps we can infer some of that based on which MHC-II molecules they express later:
+
+* AIRE
+* IL7RA
+* PTPRC (CD45)
+* EPCAM
+* CD40
+* CTSS
+* CD74
+* ITGAX (CD11c)
+* ITGAM (CD11b)
+* RORC
+* HLA-DRA1, HLA-DRB1, HLA-DQB1, HLA-DQA1, HLA-DPB1
+* CD80/CD86
+* CD4, CD8
+
+```{r, echo=FALSE}
+# let's get the gene symbols for these genes, Ensembl IDs aren't very memorable!
+ensembl <- useEnsembl(biomart='ensembl', dataset='hsapiens_gene_ensembl', GRCh=37)
+
+gene_symbol <- getBM(attributes=c('ensembl_gene_id', 'external_gene_name'),
+                     filters='ensembl_gene_id', mart=ensembl,
+                     values=rownames(etacs.qc))
+etacs.qc$gene_id <- rownames(etacs.qc)
+etacs.merge <- merge(etacs.qc, gene_symbol, by.x="gene_id", by.y="ensembl_gene_id")
+```
+
+```{r, echo=FALSE}
+marker.genes <- c("AIRE", "IL7R", "PTPRC", "EPCAM", "HLA-DRA1", "HLA-DRB1",
+                  "HLA-DQB1", "HLA-DQA1", "HLA-DPB1", "CD40", "CD74", "CCR7", "CD274",
+                  "ITGAX")
+marker.exprs <- etacs.merge[etacs.merge$external_gene_name %in% marker.genes, ]
+print(marker.exprs$external_gene_name)
+```
+
+__NB__ 16 out of the 21 marker genes are expressed including _HLA-DQB1_, _HLA-DRB1_, _HLA-DQA1_ and _HLA-DPB1_.  It is important to note that these are _not_ related to the HLA genotypes for these individuals as I did not align these data to all of the alternative HLA alleles, only those included in the standard reference genome.  This might also be due to homology between MHC-II genes so reads are mapping to multiple locations equally.
+
+We have detectable expression of _AIRE_, _CD40_, _IL7R_, _CD74_, _CD11b_, _CD11c_ and Cathepsis S across these cells; we can also confirm detectable transcription of _CD80_ and _CD86_.  As expected CD45 is expressed (_PTPRC_), however we do not see _EPCAM_, which is troubling as this was a gating marker for these cells.  Jo tells me that they also found quite low _EPCAM_ expression from bulk RNAseq.  Let's look at how the expression distributed across all of the cells.
+
+```{r, fig.width=7.5, fig.height=4.5, echo=FALSE}
+exprs.melt <- melt(marker.exprs, id.vars=c("gene_id", "external_gene_name"))
+
+marker.p <- ggplot(exprs.melt[exprs.melt$external_gene_name %in% c("AIRE", "CD45", "CD74", "HLA-DPB1", "HLA-DQA1",
+                                                                   "HLA-DQB1", "HLA-DRB1", "CD40", "IL7R", "EPCAM"), ],
+                   aes(x=external_gene_name, y=value, fill=external_gene_name)) +
+  geom_jitter(alpha=0.7, size=3, shape=21) + theme_mike() +
+  scale_fill_Publication() +
+  theme(axis.text.x=element_text(angle=90, face='italic')) +
+  labs(x="Gene Symbol", y=expression(paste("Log"[2], " Normalised Expression"))) +
+  guides('fill'=FALSE)
+
+ggsave(marker.p,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1c_marker_genes.png",
+       height=4.25, width=7.5, dpi=300)
+
+marker.p
+```
+
+We can see that MHC-II molecules, CD45 and CD74 are constituitively expressed across cells, concordant with their proposed function as antigen presenting cells and bone-marrow origin.  There is limited AIRE expression in these cells, but where present it is generally highly expressed.  As we understand from mice and thymic expression of AIRE there is a disconnect between transcript and protein levels, as well as the sporadic expression at the Aire locus itself in mice, so this is no great surprise.  CD11b (_ITGAM_) is present on a smaller subset of cells than CD11c, which is more widely expressed and may indicate these cells are derived from, or are, a dendritic cell type.  IL-7R is more variable, which is similar to the mice eTACs which also had quite variable _Il7r_ expression.  A large number of cells are also _CD4_+ found on classical CD11b+ DCs.
+
+Let's also check that lineage markers are absent from the majority of cells.
+
+```{r, echo=FALSE}
+lineage.markers <- c("CD19", "IGHM", "CD3D", "CD3G", "CD28", "MA4A1", "CD14", "FCGR1A", "FCGR2B", "FCGR3A",
+                     "FCGR3B",  "NCAM1",  "LYZ", "CD34")
+lineage.exprs <- etacs.merge[etacs.merge$external_gene_name %in% lineage.markers, ]
+print(lineage.exprs$external_gene_name)
+
+```
+
+```{r, echo=FALSE}
+lineage.melt <- melt(lineage.exprs, id.vars=c("gene_id", "external_gene_name"))
+
+ggplot(lineage.melt, aes(x=external_gene_name, y=value, colour=external_gene_name)) +
+  geom_jitter(alpha=0.3) + theme_mike() +
+  scale_colour_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  labs(x="Gene Symbol", y=expression(paste("Log"[2], " Normalised Expression"))) +
+  guides('colour'=guide_legend(title="Gene Symbol"))
+```
+
+There are no T cell expressed genes (_CD3G_, _CD3D_, _CD28_) present, but there is _CD19_ expression in ~25% of cells along with some _FCGR2B_ (CD32b).  Some care has to be taken with interpreting the results for the FCGR2/3 genes as they are located in a segmental duplication and share > 98% sequence homology, which will confound the mapping of reads to this area of the genome.  All we can say is the either _FCGR3A_ (CD16a) or _FCGR3B_ (CD16b) is expressed in these cells (probably _FCGR3A_ if they are DC subset).
+
+
+## Single cell clustering and determination of highly variable genes
+The first task in an exploratory single cell expression analysis is to visualise the data, and see just how heterogenous these cells are.  We'll use the Brennecke _et al_ method to fit a function to the mean-variance trend and determine highly variable genes as well.
+
+#### Highly variable genes
+We'll pick the genes that are most highly variable between cells.  These are often useful for finding sets of genes that best discriminate between multiple cell populations in a single data set.  Given that we observe 2 eTAC populations from mouse lymph nodes, we may also see them in human.
+
+In single cell data there is a relationship between the average expression of a gene across cells and how variable it is.  This is due to several apsects of how single cell transcriptome data are generated.  What this means is that genes that are more lowly expressed will look like they vary much more than highly expressed genes.  This is a technical artifact of the data, so we want to find genes that only vary _above and beyond what we would expect by chance_.  You can see how the mean and variance of each gene is related in the plot below.
+
+We measure the variability in the data using the squared coefficient of variation $CV^2$, which is the ratio of the variance to the squared mean, or more formally for any gene $j$:
+$$CV^2_{j} = \frac{\sigma^2_{j}}{\mu^2_{j}}$$
+
+```{r, echo=FALSE}
+etacs.nz <- etacs.qc[, -1]
+etacs.nz <- etacs.nz[, -dim(etacs.nz)[2]]
+
+means <- rowMeans(etacs.nz, na.rm = T)
+vars <- apply(etacs.nz, 1, var, na.rm=T)
+cv2 <- vars/(means^2)
+
+smoothScatter(means, cv2, xlab="Mean expression", ylab=expression("CV"^2))
+```
+
+Next I will fit a function to the mean-variance relationship, and look for genes that vary beyond some confidence threshold.
+
+```{r, echo=FALSE}
+# calculate highly variable genes from a model fit
+# find the minimum mean prior to fitting
+minMeanForFit <- unname(quantile(means[which(cv2 > 0.2)], 0.8))
+
+# select genes with mean value greater than min value for fitting
+useForFit <- 1/means == 0
+
+# fit with a gamma-distributed GLM
+fit <- glmgam.fit(cbind(a0 = 1, a1tilde=1/means[!useForFit]), cv2[!useForFit])
+
+# calculate % variance explained by the model fit
+resid.var <- var(fitted.values(fit) - cv2[!useForFit])
+total.var <- var(cv2[!useForFit])
+
+# get fitted values and mean-dispersion dependence line
+a0 <- unname(fit$coefficients["a0"])
+a1 <- unname(fit$coefficients["a1tilde"])
+
+xg <- seq(0, max(means[means != Inf]), length.out=100000)
+vfit <- (a1/xg) + a0
+
+# add confidence intervals
+d.f <- ncol(etacs.nz) - 1
+
+# rank genes by the significance of their deviation from the fit
+# to call HVGs
+a.fit <- (a1/means) + a0
+varFitRatio <- vars/(a.fit * means^2)
+varOrder <- order(varFitRatio, decreasing=T)
+
+oed <- etacs.nz[varOrder, ]
+smoothScatter(means, cv2,xlab="Mean expression", ylab=expression("CV"^2))
+lines(xg, vfit, col="black", lwd=3 )
+lines(xg, vfit * qchisq(0.975, d.f)/d.f, lty=2, col="black")
+lines(xg, vfit * qchisq(0.025, d.f)/d.f,lty=2,col="black")
+
+# display the 100 most highly variable genes
+points(means[varOrder[1:100]], cv2[varOrder[1:100]], col='red')
+```
+
+The red points are the top 100 most highly variable genes in these data, before formally testing for any significant deviation from what we would expect based on the black fitted lines.
+
+```{r, echo=FALSE}
+pvals <- pchisq(varFitRatio * d.f, d.f, lower.tail = F)
+pvals[is.na(pvals)] <- 1.0
+adj.pvals <- p.adjust(pvals, method='fdr')
+HVG <- adj.pvals <= 1e-2
+table(HVG)
+
+write.table(HVG,
+            "~/Dropbox/ETACS/human_etac-HVG.tsv",
+            quote=F, sep="\t")
+```
+
+So there are just 128 genes that are more highly variable than we would expect by chance.  Let's see if these are informative for visualising the cells.  We'll use a dimensionality reduction technique here call t-stochastic neignhbour embedding (tSNE).  This is a useful method for visualising highly dimensional data such as these in just 2 dimensions.  We will also do some hierarchical clustering based on these 128 genes.
+
+```{r, echo=FALSE}
+etacs.hvg <- etacs.nz[HVG, ]
+etacs.hvg[is.na(etacs.hvg)] <- 0
+
+# cluster cells on the basis of their HVGs
+etacs.cor <- cor(etacs.hvg, method='spearman')
+etacs.cor[is.na(etacs.cor)] <- 0
+spearman.dist <- as.dist(1 - etacs.cor)
+spearman.tree <- flashClust(spearman.dist, method='average')
+plot(spearman.tree)
+spearman.cut <- cutreeDynamicTree(dendro=spearman.tree, minModuleSize = 30, 
+                                  deepSplit=F)
+spearman.cols <- labels2colors(spearman.cut)
+etacs.cluster <- data.frame(cbind(colnames(etacs.cor), spearman.cols))
+colnames(etacs.cluster) <- c("Sample", "Cluster")
+```
+
+One might argue there are 2-3 groups of cells in this dendrogram, but it's not 100% clear cut.  It does look promising that there are multiple groups of cells. We'll also need to be careful that these don't just correspond to the two donors!
+
+
+```{r, fig.height=4.5, fig.width=4.5, echo=FALSE}
+# get low dimensional embedding of genes by tSNE
+donor.cols <- c("darkgreen", "purple")
+names(donor.cols) <- unique(etacs.meta$Donor)
+
+set.seed(291060)
+etacs.hvg <- etacs.hvg[, !duplicated(t(etacs.hvg))]
+etacs.tsne <- Rtsne(t(etacs.hvg), perplexity=50)
+etacs.map <- data.frame(etacs.tsne$Y)
+colnames(etacs.map) <- c("Dim1", "Dim2")
+etacs.map$Sample <- colnames(etacs.hvg)
+bm.tsne.merge <- merge(etacs.map, etacs.meta,
+                       by='Sample')
+etacs.uber <- merge(bm.tsne.merge, etacs.cluster,
+                         by='Sample')
+etacs_t <- ggplot(etacs.uber,
+                       aes(x=Dim1, y=Dim2, fill=Donor)) + 
+  geom_point(size=2, pch=21) + theme_mike() +
+  scale_fill_manual(values=donor.cols) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+etacs_t
+```
+
+The first thing to note here is that the cells from the two donors are mixed together, so they aren't a major source of variation which is very encouraging.  Other thing to note is that there is not much striking structure in these data either.  One could arguablt say there are some cells which group together a bit more with others, but this is very hand wavy.  It is worth pointing out that this does _not_ mean there is only a single group of cells, but that based on the 128 genes that are most variable across these cells they do not delineate between any groups.  Using just these 128 genes may not capture sufficient information in the data to pull out any specific cell populations, often we need >1000 genes to capture the patterns of co-expression that determine different cell groups.  The more closely related any two cell groups are, the more genes are generally required to distinguish between them (in the absence of known marker genes).
+
+Let's take a look at these cells using more genes, that way we will get a more comprehensive picture of any heterogeneity between them.
+
+We'll use the top 2000 most variable genes in general, and use these to perform a principal components analysis (PCA).  PCA separates the data in to its most co-variable components, so it is ideal for this task.
+
+```{r, fig.height=4.5, fig.width=4.5, echo=FALSE}
+top.genes <- names(vars[order(vars, decreasing=T)][1:2000])
+etacs.top <- etacs.nz[top.genes, ]
+etacs.pca <- prcomp(t(etacs.top), center=T, scale=T)
+etacs.pcs <- as.data.frame(etacs.pca$x)
+colnames(etacs.pcs) <- paste0("PC", 1:dim(etacs.pcs)[2])
+etacs.pcs$Sample <- colnames(etacs.top)
+
+pcs.merge <- merge(etacs.pcs, etacs.meta, by='Sample')
+
+ggplot(pcs.merge, aes(x=PC1, y=PC2, fill=Donor)) +
+  geom_point(size=2, pch=21) + theme_mike() +
+  scale_fill_manual(values=donor.cols)
+
+```
+
+This looks a bit more convincing that there are two populations of cells in these data, and that they do not correspond to the two donors.  We can try to get a better visualisation using tSNE, which is better at representing highly dimensional data when there are non-linear relationships between cells.
+
+```{r, fig.height=4.5, fig.width=4.5, echo=FALSE}
+set.seed(291060)
+etacs.tsne.5000 <- Rtsne(t(etacs.top), perplexity=30, theta=0.1)
+etacs.map.5000 <- data.frame(etacs.tsne.5000$Y)
+colnames(etacs.map.5000) <- c("Dim1", "Dim2")
+etacs.map.5000$Sample <- colnames(etacs.top)
+tsne.merge.5000 <- merge(etacs.map.5000, etacs.meta,
+                       by='Sample')
+etacs.uber.5000 <- merge(tsne.merge.5000, etacs.cluster,
+                         by='Sample')
+etacs_t.5000 <- ggplot(etacs.uber.5000,
+                       aes(x=Dim1, y=Dim2, fill=Donor)) + 
+  geom_point(size=2, pch=21) + theme_mike() +
+  scale_fill_manual(values=donor.cols) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+ggsave(etacs_t.5000,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1d_tSNE_by_donor.png",
+       height=4.5, width=4.5, dpi=300)
+
+etacs_t.5000
+```
+
+There appear to be at least two groups of cells, but they look to be very close, even in high dimensionl space.  We can look at the genes that best discriminate between these groups without _a priori_ defining the groups.  The  cell groups are best separated along the x-axis, the first principal component which captures the greatest variation in the data.  We can look at which genes contribute the most to the first principal component, and how their expression levels differ between cells.  For the sake of simplicity we will just take the top 75 genes with the strongest influence on principal component 1.
+
+
+```{r, fig.height=4.5, fig.width=10.5, echo=FALSE}
+pc.loadings <- as.data.frame(etacs.pca$rotation)
+pc.loadings$gene_id <- rownames(pc.loadings)
+loading.merge <- merge(pc.loadings, gene_symbol,
+                       by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+loading.merge <-loading.merge[order(abs(loading.merge$PC1), decreasing=TRUE), ]
+loading.merge[, 2:(dim(loading.merge)[2]-1)] <- apply(loading.merge[, 2:(dim(loading.merge)[2]-1)],
+                                                      2,
+                                                      abs)
+
+ggplot(loading.merge[1:75, ], aes(x=reorder(external_gene_name, -PC1),
+                                y=PC1)) +
+  geom_bar(stat='identity') + theme_mike() +
+  theme(axis.text.x=element_text(angle=90, size=10)) +
+  labs(x="Gene ID", y="PC1 loading")
+
+```
+
+The first thing to note here is that there isn't one gene driving the differences between cells, but lots of genes each with a small contribution.  I recall that _Ccr7_ was one of the markers in the mouse eTACs that helped to discriminate between the two groups, so it is interesting to see _CCR7_ is also one of the most discriminatory genes in these human data too.  This isn't the most interesting way to visualise the cells, so let's see just how well these 75 genes are able to delineate between the two eTAC groups.
+
+```{r, echo=FALSE}
+etacs.hm <- etacs.nz[loading.merge[1:75, ]$gene_id, ]
+etacs.hm$gene_id <- rownames(etacs.hm)
+etacs.symbol <- merge(etacs.hm, gene_symbol, by.x='gene_id', by.y='ensembl_gene_id')
+rownames(etacs.symbol) <- etacs.symbol$external_gene_name
+etacs.symbol <- etacs.symbol[, -1]
+etacs.symbol <- etacs.symbol[, -(dim(etacs.symbol)[2])]
+
+# cluster cells using the top 2000 genes
+etacs.cor <- as.data.frame(cor(etacs.hm[, 1:(dim(etacs.hm)[2]-1)]))
+
+etacs.cor[is.na(etacs.cor)] <- 0
+cor.dist <- as.dist(1 - etacs.cor)
+cor.tree <- flashClust(cor.dist, method='average')
+cor.cut <- cutreeDynamicTree(dendro=cor.tree, minModuleSize = 30,
+                                  deepSplit=F)
+cor.cols <- labels2colors(cor.cut)
+etacs.cluster <- data.frame(cbind(colnames(etacs.cor), cor.cols))
+colnames(etacs.cluster) <- c("Sample", "Cluster")
+etacs.cluster$Cluster <- as.character(etacs.cluster$Cluster)
+etacs.cluster$Cluster[etacs.cluster$Cluster == "blue"] <- 1
+etacs.cluster$Cluster[etacs.cluster$Cluster == "turquoise"] <- 2
+etacs.cluster$Cluster <- as.factor(etacs.cluster$Cluster)
+
+annot.df <- etacs.cluster
+annot.df <- as.data.frame(annot.df[, 2])
+rownames(annot.df) <- etacs.cluster$Sample
+colnames(annot.df) <- c("Cluster")
+annot.df$Cluster <- as.factor(annot.df$Cluster)
+
+cluster.cols <- c("#386cb0", "#fdb462")
+names(cluster.cols) <- levels(annot.df$Cluster)
+annot.cols <- list("Cluster"=cluster.cols)
+```
+
+
+
+```{r, fig.height=12.5, fig.width=6.5, echo=FALSE}
+pheatmap(etacs.symbol, show_colnames=FALSE, show_rownames=TRUE,
+         cutree_cols=3, annotation_col=annot.df,
+         annotation_colors=annot.cols)
+```
+
+The clustering of cells into 2 groups using either hierarchical clustering or K-means clustering does not cleanly split the data into distinct groups.  This suggests that these may be very closely related sub populations, which might reflect different states of a single cell type, rather than different cell types _per se_.  There may be a 3rd intermediate population between these two groups, that contains a mixture of cells; it will be worth re-visiting these cells in the context of a pseudotemporal ordering.  A major confounder in many single cell data sets is the correlation/variability in expression is driven by the cell cycle, i.e. cells that are actively dividing often create spurious groups and correlations within the data.  I will come back to the issue of the cell cycle later; it was not an issue in our mouse eTAC data, so I might not necessarily expect it to be a source of confounding here either.
+
+### Expression differences between groups
+
+First let's take a look at how marker genes and genes of interest, i.e. _AIRE_, differ between our two groups of cells.
+
+```{r, fig.height=4.5, fig.width=9.5, echo=FALSE}
+marker.groups <- merge(exprs.melt, etacs.cluster, by.x='variable', by.y='Sample')
+marker.groups$external_gene_name <- factor(marker.groups$external_gene_name,
+                                           labels=c("AIRE", "PTPRC", "CD74", "HLA-DPB1",
+                                                          "HLA-DQA1", "HLA-DQB1", "HLA-DRB1",
+                                                          "CD40", "IL7R", "ITGAX",
+                                                          "CCR7", "CD274", "EPCAM"),
+                                           levels=c("AIRE", "PTPRC", "CD74", "HLA-DPB1",
+                                                          "HLA-DQA1", "HLA-DQB1", "HLA-DRB1",
+                                                          "CD40", "IL7R", "ITGAX",
+                                                          "CCR7", "CD274", "EPCAM"))
+marker.by_cluster <- ggplot(marker.groups, 
+                            aes(x=external_gene_name,
+                                y=value,
+                                fill=Cluster)) +
+  geom_point(size=3,
+             pch=21,
+             alpha=0.6, position=position_jitterdodge(dodge.width=0.8)) + 
+  theme_mike() +
+  scale_fill_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  labs(x="Gene Symbol", y=expression(paste("Log"[2], " Normalised Expression")))
+
+ggsave(marker.by_cluster,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1_Markers_by_cluster.png",
+       height=5.25, width=9.75, dpi=300)
+
+marker.by_cluster
+```
+
+The first thing we can see is that the larger cluster `2` has fewer cells expressing _AIRE_ than the smaller cluster `1`.  Only 4 cells in cluster `2` express _AIRE_, whilst 21 are _AIRE_ positive in cluster `1`.  This equates to 14.5% vs. 2.8% of cells, though these are not necessarily accurate estimates of true proportions given the low cell numbers.  Perhaps more striking are the differences between the clusters of _CD163L1_ and _ITGAM_ (CD11b), which is almost absent from the smaller cluster `1` cells.  The other marker genes are expressed at similar levels, and by similar proportions of cells between the two groups.
+
+The next step is to look for statistically consistent differences between cells.
+
+### Differential gene expression
+
+I  will fit a linear model to each gene, and adjust for factors that I think might be important confounders.  The first, and perhaps most obvious, is the donor from which the cells were derived.  It's not entirely clear in single cell experiments how much plate spatial effects contribute to variability between cells; to be safe I'll include a spatial factor in the model to prevent any confounding entering our results.  If there is no effect, this might just make our estimates and analysis a little conservative; this isn't generally a problem as we have lots and lots of cells to perform our analysis with so we aren't going to miss anything important.
+
+```{r, fig.height=4.5, echo=FALSE}
+# create a design matrix, adjust for donor, plate and well effects
+etacs.meta.data <- merge(etacs.meta[colnames(etacs.nz), ],
+                         etacs.cluster, by='Sample')
+etacs.meta.data$PlateRow <- as.numeric(as.character(etacs.meta.data$PlateRow))
+
+design.mat <- model.matrix(~ PlateRow + Donor + Cluster, data=etacs.meta.data)
+
+# fit a linear model
+fit <- limma::lmFit(etacs.nz, design.mat)
+fit <- limma::eBayes(fit)
+sum.res <- summary(limma::decideTests(fit))
+
+de.res <- limma::topTable(fit, coef="Cluster2", n=Inf, sort="p", p=1.0)
+de.res$Sig <- 0
+de.res$Sig[de.res$adj.P.Val <= 0.01] <- 1
+de.res$Sig <- as.factor(de.res$Sig)
+
+de.res$Diff <- 0
+de.res$Diff[de.res$logFC < 0 & de.res$Sig == 1] <- -1
+de.res$Diff[de.res$logFC > 0 & de.res$Sig == 1] <- 1
+
+sum.res[, -4]
+```
+
+First things first we can see that the plate spatial effect has very little impact on average differences in expression, just a single gene is differentially upregulated across the plate.  There are a few more differences between our two donors; 17 are down-regulated in Donor B, and 8 are up-regulated.  Again, that is quite comforting that the differences between individuals for these cells has such a minimal impact on our analysis and underpins the importance of good experimental design.
+
+```{r, echo=FALSE}
+table(de.res$Diff)
+```
+
+Last, and by no means least, we can see that the number of genes that are differentially expressed between the two groups of cells; 697 genes are down-regulated in cluster `2` and 1100 are up-regulated at a FDR 1%.  Below is an MA-plot that shows the average expression against the log$_2$ fold change between cluster `1` and `2`.
+
+
+```{r, echo=FALSE, fig.height=4.75, fig.width=6.5*1.618}
+de.res$gene_id <- rownames(de.res)
+de.merge <- merge(de.res, gene_symbol,
+                  by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+gene.top <- de.merge$external_gene_name
+gene.top[de.merge$logFC > -6 & de.merge$logFC < 6] <- ""
+gene.top[is.na(gene.top)] <- ""
+
+sig.cols <- c("#A49D9D", "#FF0000")
+names(sig.cols) <- c("0", "1")
+
+cluster.ma <- ggplot(de.merge, aes(x=AveExpr, y=logFC, colour=Sig)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_manual(values=sig.cols) +
+  labs(x=expression(paste("Mean log"[2], " Expression")),
+       y=expression(paste("log"[2], " Fold Change"))) +
+  guides('colour'=guide_legend(title="FDR 1%")) +
+  ylim(c(-10, 10)) +
+  geom_text_repel(aes(label=gene.top),
+                  colour='black',
+                  nudge_x=0,
+                  nudge_y=1.0)
+
+ggsave(cluster.ma,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1e_MAplot.png",
+       height=4.75, width=6.5*1.618, dpi=300)
+
+cluster.ma
+```
+
+We'll look at the top 10 up and down regulated genes, these should roughly correspond to the the 50 genes we saw earlier that discriminated between the two groups of cells in the PCA.
+
+```{r, echo=FALSE}
+up.reg <- de.merge[de.merge$Diff == 1,]
+head(up.reg[order(up.reg$logFC, decreasing=T),]$external_gene_name, 10)
+```
+
+```{r, echo=FALSE}
+down.reg <- de.merge[de.merge$Diff == -1,]
+head(down.reg[order(down.reg$logFC, decreasing=F),]$external_gene_name, 10)
+
+```
+
+The most strongly up-regulated genes in cluster `2` are _FGL2_, _FCER1G_, _SAMHD1_, _ARHGDIB_, _AIF1_ and _CYBB_.  The most strongly down regulated genes are _CCR7_, _MGLL_, _LAD1_, _SAMSN1_, _CD200_ and _AOC1_.  We find that _AIRE_ is statistically significantly down-regulated between the two clusters with a logFC of -1.90.  Normall we would not be able to differentiate between whether this is due to a change in the average expression across all cells, or a change in the number of cells that express _AIRE_.  Because we can visualise the difference for this gene we can say that it is due to fewer cells that express _AIRE_, rather than a global down-regulation.  This raises an important point that for many genes it is not possible to statistically differentiate between those that change in total expression across all cells in a group, and a shift in the number of cells expressing a gene (i.e. the dispersion or variance of a gene) within a group using these approaches.
+
+I'm quite curious about how much of these differences are due to gradients shifts in expression versus binary on/off differences.  I'll plot a few genes of interest to get an idea.
+
+* _AIRE_
+* _CD19_
+* _CCR7_
+* _CD4_
+* _IDO_
+* _ITGAM_ (CD11b)
+* _ITGAX_ (CD11c)
+* _CD163L1_
+* _CD274_ (PDL1)
+
+```{r, fig.height=9.5, fig.width=9.5, echo=FALSE}
+goi <- c("AIRE", "CD19", "CCR7", "CD4", "IDO1", "ITGAM", "ITGAX", "CD163L1", "CD274")
+markers.df <- as.data.frame(t(etacs.merge[etacs.merge$external_gene_name %in% goi, 2:(dim(etacs.merge)[2]-1)]))
+colnames(markers.df) <- etacs.merge$external_gene_name[etacs.merge$external_gene_name %in% goi]
+markers.df$Sample <- rownames(markers.df)
+
+merge.markers <- merge(etacs.uber.5000, markers.df, by='Sample')
+
+aire.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=AIRE)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+cd19.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=CD19)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+ccr7.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=CCR7)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+cd4.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=CD4)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+ido.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=IDO1)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+itgam.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=ITGAM)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+itgax.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=ITGAX)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+cd163l1.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=CD163L1)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+cd274.p <- ggplot(merge.markers, aes(x=Dim1, y=Dim2, colour=CD274)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_distiller(palette="RdYlBu", direction=-1) +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+goi.grid <- plot_grid(ccr7.p, itgax.p, cd274.p, 
+                      labels=c("CCR7", "CD11c", "PD-L1"),
+                      ncol=3)
+ggsave(goi.grid,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1f_GOIs_on_tSNE.png",
+       height=4.25, width=7.25*1.618, dpi=300)
+
+plot_grid(aire.p, cd19.p, ccr7.p, cd4.p, ido.p, itgam.p,
+          itgax.p, cd163l1.p, cd274.p,
+          labels=c("AIRE", "CD19", "CCR7", "CD4", "IDO", "CD11b",
+                   "CD11c", "CD163L1", "PDL1"),
+          ncol=3, align="h")
+```
+
+The genes with the most striking differences are _CCR7_ and _ITGAX_ (CD11c) which define the two sub-populations of cells.  A larger proportion of the smaller cluster appear to express _IDO_, but there is little/no overlap with _CD19_, which would mark these as similair to mouse CD19+ tolerogenic DCs.  _CD163L1_ is restricted to a very small group of the larger cluster of cells.  These 9 genes do not demonstrate any obvious gradient of expression between the two populations precluding their involvement in any continuous change in state or developmental trajectory.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=4.5, fig.height=4.5}
+etacs.uber.5000 <- merge(tsne.merge.5000, etacs.cluster,
+                         by='Sample')
+by.cluster <- ggplot(etacs.uber.5000,
+       aes(x=Dim1, y=Dim2, fill=Cluster)) + 
+  geom_point(size=2, pch=21) + theme_mike() +
+  scale_fill_Publication() +
+  labs(x="tSNE Dimension 1", y="tSNE Dimension 2")
+
+ggsave(by.cluster,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Figure1d_tSNE_by_cluster.png",
+       height=4.5, width=4.5, dpi=300)
+```
+
+### Promiscuous gene expression in human eTACs
+
+Given the relatively limited expression of _AIRE_ in these eTACs, we would like to know if they show expression of tissue restricted antigen genes, even for cells that lack _AIRE_ transcripts.  We'll start with a few classic TRAs like insulin, 21-OH, etc, then we can look at a wider set of TRAs.  To look at promiscuous gene expression (pGE) we often want to look for genes expressed in just 1 or a few cells.  Therefore we need to go back and get our entire expression matrix and re-normalise it containing these additional genes.
+
+Tissue restricted antigen genes:
+
+* _INS_ (Insulin; pancreas)
+* _VIM_ (Vimentin; connective tissue)
+* _GCG_ (Glucagon; pancreas)
+* _GAD1_ (Glutamate decarboxylase; pancreas)
+* _TYRP1_ (Tyrosinase associated protein 1; skin)
+* _DSG3_ (Desmoglein 3; skin)
+* _CYP21A2_ (21-OH; adrenal glands)
+* _RBP3_ (Retinol binding protein 3; retina)
+* _RPE65_ (Retinoid isomerohydrolase; retina)
+* _TG_ (Thyroglobulin; thyroid)
+* _TPO_ (Thyroid peroxidase; thyroid)
+* _PLP1_ (Proteolipid protein 1; nervous system)
+
+```{r, echo=FALSE}
+# get the wider TRA definitions from FANTOM5
+tra.genes <- c("INS", "VIM", "GCG", "GAD1", "TYRP1", "DSG3", "CYP21A2", "RBP3",
+               "RPE65", "TG", "TPO", "PLP1")
+
+keep_more_genes <- gene_sparsity <= 0.995
+qc.nz2 <- qc.counts[keep_more_genes, ]
+pd.qc2 <- new("AnnotatedDataFrame", etacs.meta[colnames(qc.nz2), ])
+qc2.sce <- newSCESet(countData=qc.nz2, phenoData=pd.qc2)
+
+clusters <- quickCluster(qc2.sce, min.size=55, get.spikes=T)
+qc2.sce <- computeSumFactors(qc2.sce, sizes=c(20, 22, 25, 27), positive=T,
+                         assay.type='counts', clusters=clusters)
+qc2.sce <- normalize(qc2.sce)
+etacs.exprs <- as.data.frame(exprs(qc2.sce))
+etacs.exprs$gene_id <- rownames(etacs.exprs)
+etacs.exp.merge <- merge(etacs.exprs, gene_symbol,
+                         by.x='gene_id', by.y='ensembl_gene_id',
+                         all.x=TRUE)
+
+write.table(etacs.exp.merge,
+            file="~/Dropbox/ETACS/human_eTAC-SFnorm.tsv",
+            quote=F, row.names=F, sep="\t")
+
+write.table(etacs.meta.data,
+            file="~/Dropbox/ETACS/human_eTAC-metadata.tsv",
+            quote=F, row.names=F, sep="\t")
+
+tra.exprs <- etacs.exp.merge[etacs.exp.merge$external_gene_name %in% tra.genes, ]
+
+tra.melt <- melt(tra.exprs, id.vars=c("gene_id", "external_gene_name"))
+tra.merge <- merge(tra.melt, etacs.cluster, by.x='variable', by.y='Sample')
+
+ggplot(tra.merge, aes(x=external_gene_name, y=value,
+                     colour=Cluster)) +
+  geom_point(size=3,
+             alpha=0.3, position=position_jitterdodge(dodge.width=1)) + 
+  theme_mike() +
+  scale_colour_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  labs(x="Gene Symbol", y=expression(paste("Log"[2], " Normalised Expression")))
+```
+
+Of 12 classic TRAs, only _VIM_ (Vimentin) is expressed in these human eTACs, and it is quite highly expressed in nearly all cells.  This is a bit of a blow to the hypothesised function of these cells as tolerogenic cells capable of endogenous TRA expression.  Let's take a look at more TRAs to see if they are capable of expressing a specific set of TRAs for other tissues.  We can also look at what proportion of expressed genes show a tissue restricted expression pattern.  For this I've used the FANTOM5 data which contains 5' TSS expression data (CAGE-seq) on > 1500 samples across a large array of diverse tissues.  The tissue restricted expression of each gene $i$ is calculated over 126 tissue and cell type categories using an index that measures how much of the total expression across all cell types & tissues is attributed to the cell type with the highest expression.  This is called the Tau ($\tau$) index:
+
+$$ \tau_i = \frac{\Sigma(1 - \hat{x}_i)}{n - 1}$$
+$$ \hat{x}_i = \frac{x_i}{max(x_i)} $$
+The distribution of $\tau$ can be used to delineate genes into tissues with a high specificity for a particular tissue $\tau \geq$ 75th percentile, and genes that are constituitively expressed $\tau \leq$ 25th percentile.  For instance in the plot below we can see how the distribution forms two "humps" at either end of the distribution.
+
+```{r, echo=FALSE}
+tra.df <- read.table("~/Dropbox/fantom5/hg19/Human-Tau_TRA_level3.tsv",
+                     h=T, sep="\t", stringsAsFactors=F)
+
+tra.quants <- quantile(tra.df$tau, probs=c(0.25, 0.75), na.rm=TRUE)
+tra.df$GeneGroup <- "Misc"
+tra.df$GeneGroup[tra.df$tau <= tra.quants[1]] <- "Constituitive"
+tra.df$GeneGroup[tra.df$tau > tra.quants[2]] <- "Tissue-Restricted"
+
+ggplot(tra.df, aes(tau)) +
+  geom_histogram(bins=100) +
+  theme_mike() +
+  geom_vline(aes(xintercept=tra.quants[1]), linetype=5, colour='purple') +
+  geom_vline(aes(xintercept=tra.quants[2]), linetype=5, colour='purple') +
+  labs(x="Tau", y="Number of Genes")
+```
+
+The leftmost purple line shows the 25th percentile, below this point genes are considered constituitively expressed.  The rightmost line represents the 75th percentile, which are the genes with more tissue-restricted expression patterns.  These cut-offs correspond approximately to previous definitions for TRAs as expressed in 1-5 tissues.
+
+```{r, echo=FALSE}
+source("~/Dropbox/R_sessions/eTAC/human_alpha_islets.R")
+hum.merge <- merge(etacs.exp.merge, panc.alpha, by='gene_id', all=TRUE)
+hum.merge[is.na(hum.merge)] <- 0
+
+fantom.exprs <- merge(hum.merge, tra.df[, (dim(tra.df)[2]-5):(dim(tra.df)[2])],
+                      by.x='gene_id', by.y='ensembl.gene')
+fantom.cols <- colnames(tra.df[, (dim(tra.df)[2]-5):(dim(tra.df)[2])])[-2]
+fant.melt <- melt(fantom.exprs, id.vars=c(fantom.cols, 'gene_id', 'external_gene_name'))
+fant.melt$CellType <- ""
+fant.melt$CellType[grepl(fant.melt$variable, pattern="eTAC")] <- "human_eTAC"
+fant.melt$CellType[grepl(fant.melt$variable, pattern="alpha")] <- "human_AlphaIslet"
+```
+
+```{r, echo=FALSE}
+source("~/Dropbox/R_sessions/eTAC/compare_TRA_props_eTAC_mTEC.R")
+
+fantom.merge <- merge(fant.melt, etacs.cluster, by.x='variable', by.y='Sample', all=TRUE)
+
+all.merge <- as.data.frame(rbind(fantom.merge[, c(1, 3, 4, 5, 6, 7, 9, 10)],
+                                 mouse.fant.melt))
+```
+
+First we can look at what proportion of genes are either tissue-restricted, constituitive, or somewhere in between.  We can also see if there are any differences between the two eTAC clusters.  We can compare this to the same pattern in single mouse medullary thymic epithelial cells (sorry, I don't have any human mTECs to compare it to), and mouse eTACs.  I'll also compare these to human and mouse pancreatic $\alpha$ islet cells as a peripheral tissue control group.
+
+```{r, fig.height=7.5, fig.width=7.5, echo=FALSE}
+pge.human <- ggplot(fantom.merge[fantom.merge$value > 1 & !is.na(fantom.merge$Cluster), ],
+       aes(x=Cluster, fill=GeneGroup)) +
+  geom_bar(position='fill') + 
+  theme_mike() +
+  scale_fill_Publication() +
+  labs(x="Cell Type", y="Percentage of Expressed Genes")
+
+# plot the numbers expressed in each group
+pge.all <- ggplot(all.merge[all.merge$value > 1, ],
+       aes(x=CellType, fill=GeneGroup)) +
+  geom_bar(position='fill') + 
+  theme_mike() +
+  scale_fill_Publication() +
+  labs(x="Cell Type", y="Percentage of Expressed Genes")
+
+plot_grid(pge.human, pge.all,
+          labels=c("Human eTACs", "Human & mouse eTACs and mTECs"),
+          nrow=2)
+```
+
+In the top plot we can see that there is no difference in the distribution of tissue-restricted genes between the two groups of human eTACs, so they can be safely grouped together for the purpose of this analysis.  When we compare them with mouse eTACs (EpCam-Cd45+MHCII+Aire-GFP+) and mouse mTECs (Cd45-EpCam+MHCIIhi) we can see slight differences in the proportions of genes that show tissue-restricted expression patterns.  The most striking difference is the proportion of tissue-restricted genes in mTECs compared to the human eTACs.  Infact, what we see is that these human eTACs express a comparible proportion of tissue-restricted genes as both the mouse and human $\alpha$ islet cells.  The mouse eTACs express a restricted set of TRAs, which can be seen as a slight increase in the proportion of TRAs expressed.
+
+One final thing to look at in this section is whether there is a difference between the _AIRE_ positive and negative cells.  I will restrict this analysis to just the smaller group of eTACs as many more of these cells express _AIRE_ than the other group.
+
+### TRAs detected from bulk RNA seq
+These are TRAs reportedly detect from bulk RNA seq of human eTAC cells.  Are any of these a) detectable in single cells, and b) related to non-immune peripheral tissues?
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=7.5}
+jo.tra <- read.table("~/Dropbox/ETACS/eTAC_TSA_table-LFC.txt", h=T, sep="\t", stringsAsFactors=F)
+jo.tra$Tissue <- gsub(jo.tra$RNA.TS.FPKM, pattern=": [0-9]+\\.[0-9]+", replacement="")
+
+bulk.tras <- etacs.exp.merge[etacs.exp.merge$external_gene_name %in% jo.tra[, 1],]
+
+bulk.merge <- merge(bulk.tras, jo.tra, by.x='external_gene_name', by.y='Gene')
+bulk.melt <- melt(bulk.merge, id.vars=c("external_gene_name", "gene_id", "Tissue", "RNA.TS.FPKM", "adj.P.Val", "logFC.vs.cDC."))
+
+ggplot(bulk.melt, aes(x=Tissue, y=value, colour=Tissue)) +
+  geom_jitter(alpha=0.1) + theme_mike() +
+  scale_colour_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  labs(x="Tissue", y=expression(paste("log"[2], " Expression")))
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height=7.5, fig.width=7.5}
+cluster1.cells <- as.character(etacs.cluster$Sample[etacs.cluster$Cluster == 1])
+cluster2.cells <- as.character(etacs.cluster$Sample[etacs.cluster$Cluster == 2])
+
+tra.sparsity <- as.data.frame(1 - (apply(bulk.tras[, 2:(dim(bulk.tras)[2]-1)] < 1, 1, sum)/(dim(bulk.tras)[2]-2)))
+cl1.sparsity <- as.data.frame(1 - (apply(bulk.tras[, cluster1.cells] < 1, 1, sum)/length(cluster1.cells)))
+cl2.sparsity <- as.data.frame(1 - (apply(bulk.tras[, cluster2.cells] < 1, 1, sum)/length(cluster2.cells)))
+
+colnames(tra.sparsity) <- "PropExprs"
+tra.sparsity$Gene <- bulk.tras$external_gene_name
+
+colnames(cl1.sparsity) <- "PropExprsC1"
+cl1.sparsity$Gene <- bulk.tras$external_gene_name
+
+colnames(cl2.sparsity) <- "PropExprsC2"
+cl2.sparsity$Gene <- bulk.tras$external_gene_name
+
+tra.sparse <- Reduce(function(x, y) merge(x, y, by='Gene', all=TRUE),
+                       list(tra.sparsity, cl1.sparsity, cl2.sparsity))
+
+bulk.sparse <- merge(bulk.melt, tra.sparse, by.x='external_gene_name', by.y='Gene', all=TRUE)
+bulk.sparse$BulkExprs <- as.numeric(unlist(lapply(strsplit(bulk.sparse$RNA.TS.FPKM, split=":", fixed=T), FUN=function(P) paste(P[2]))))
+
+
+lfc <- ggplot(bulk.sparse, aes(x=PropExprs, y=logFC.vs.cDC., 
+                               size=-log10(adj.P.Val), colour=Tissue)) + 
+  geom_point() + theme_mike() +
+  scale_colour_Publication() + 
+  geom_hline(aes(yintercept=2.0), linetype="dashed", colour="grey") +
+  geom_hline(aes(yintercept=0.5), linetype="dashed", colour="grey") +
+  labs(x="Proportion of cells expressed in", y="LogFC with cDC") +
+  guides(colour=FALSE, size=guide_legend(title=expression(paste("-log"[10], " adjusted P-value"))))
+
+fpkm <- ggplot(bulk.sparse, aes(x=PropExprs, y=BulkExprs, colour=Tissue)) + 
+  geom_point() + theme_mike() +
+  scale_colour_Publication() + scale_y_log10() + 
+  labs(x="Proportion of cells expressed in", y="Bulk eTAC FPKM")
+
+plot_grid(fpkm, lfc, labels=c("Bulk Expression", "logFC vs. cDC"),
+          nrow=2)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# calculate the maximum expressed tissue for each gene
+fant.tra.exprs <- tra.df[, 3:(dim(tra.df)[2]-6)]
+# remove the cell line column
+fant.tra.exprs <- fant.tra.exprs[, -(which(colnames(fant.tra.exprs) == "Cell.line"))]
+rownames(fant.tra.exprs) <- tra.df$symbol
+max.genes <- apply(fant.tra.exprs, 1, max)
+
+tra.tissue <- list()
+for(i in 1:length(jo.tra$Gene)){
+  gene.name <- max.genes[jo.tra$Gene[i]]
+  fant.vec <- fant.tra.exprs[jo.tra$Gene[i], ]
+  max.col <- which(fant.vec == gene.name, arr.ind=TRUE)[2]
+  if(!is.na(max.col)){
+    tra.tissue[[jo.tra$Gene[i]]] <- names(fant.vec[max.col])
+  }
+}
+
+jo.tau <- tra.df[tra.df$symbol %in% jo.tra$Gene, c('symbol', 'tau')]
+
+tra.tissue.df <- as.data.frame(cbind(unlist(tra.tissue)))
+colnames(tra.tissue.df) <- "FantomTissue"
+tra.tissue.df$Gene <- rownames(tra.tissue.df)
+tra.tissue.df <- merge(tra.tissue.df, jo.tau, by.x='Gene', by.y='symbol', all.x=TRUE)
+```
+
+What about the FANTOM5 tissue designations, based on the tissue label in which the gene has maximal expression?
+
+```{r, fig.height=7.5, fig.width=5.5, echo=FALSE}
+# add the FANTOM5 expression labels
+bulk.fantom <- merge(bulk.sparse, tra.tissue.df, by.x='external_gene_name', by.y='Gene')
+
+# add in cell cluster information
+bulk.fantom$GeneGroup <- "Misc"
+bulk.fantom$GeneGroup[bulk.fantom$tau <= tra.quants[1]] <- "Constituitive"
+bulk.fantom$GeneGroup[bulk.fantom$tau >= tra.quants[2]] <- "Tissue-Restricted"
+
+p.clust1 <- ggplot(bulk.fantom, aes(x=PropExprsC1, y=BulkExprs, colour=GeneGroup)) + 
+  geom_point() + theme_mike() +
+  labs(x="Proportion of cells expressed in", y="Bulk FPKM") +
+  scale_y_log10() +
+  scale_colour_Publication()
+  #scale_colour_distiller(palette="RdYlBu", direction=-1)  + 
+
+p.clust2 <- ggplot(bulk.fantom, aes(x=PropExprsC2, y=BulkExprs, colour=GeneGroup)) + 
+  geom_point() + theme_mike() +
+  labs(x="Proportion of cells expressed in", y="Bulk FPKM") +
+  scale_y_log10() +
+  scale_colour_Publication()
+
+by.cluster <- plot_grid(p.clust1, p.clust2,
+                        labels=c("Cluster 1", "Cluster2"),
+                        nrow=2)
+by.cluster
+
+ggsave(by.cluster,
+       filename="~/Dropbox/ETACS/plots.dir/TRAs_by_pcExprs.png",
+       height=7.5, width=5.5, dpi=90)  
+```
+
+### _AIRE_ stratified genes in human eTACs
+
+This analysis is restricted to the smaller groups of cells (n=71), of which 21 express detectable levels of _AIRE_.  The statistical power in this analysis will be much lower than in the previous differential expression analysis due to the small number of cells.
+
+```{r, echo=FALSE}
+# create a design matrix, adjust for donor, plate and well effects as previously
+# subset and label the group1 AIRE +ve and -ve cells
+group1.etacs <- etacs.nz[, etacs.cluster$Sample[etacs.cluster$Cluster == 1]]
+group1.meta.data <- etacs.meta.data[etacs.meta.data$Sample %in% colnames(group1.etacs), ]
+aire.tab <- marker.groups[marker.groups$external_gene_name == "AIRE", ]
+aire.pos <- as.character(aire.tab[aire.tab$value > 0 & aire.tab$Cluster == 1,]$variable)
+aire.neg <- as.character(aire.tab[aire.tab$value <= 0 & aire.tab$Cluster == 1,]$variable)
+group1.meta.data$AireStatus <- 0
+group1.meta.data$AireStatus[group1.meta.data$Sample %in% aire.pos] <- 1
+
+aire.design.mat <- model.matrix(~ PlateRow + Donor + AireStatus, data=group1.meta.data)
+
+# fit a linear model
+aire.fit <- limma::lmFit(group1.etacs, aire.design.mat)
+aire.fit <- limma::eBayes(aire.fit)
+aire.sum.res <- summary(limma::decideTests(aire.fit))
+
+aire.de.res <- limma::topTable(aire.fit, coef="AireStatus", n=Inf, sort="p", p=1.0)
+aire.de.res$Sig <- 0
+aire.de.res$Sig[aire.de.res$adj.P.Val <= 0.01] <- 1
+aire.de.res$Sig <- as.factor(aire.de.res$Sig)
+
+aire.de.res$Diff <- 0
+aire.de.res$Diff[aire.de.res$logFC < 0 & aire.de.res$Sig == 1] <- -1
+aire.de.res$Diff[aire.de.res$logFC > 0 & aire.de.res$Sig == 1] <- 1
+aire.de.res$Diff <- as.factor(aire.de.res$Diff)
+
+aire.sum.res[, -4]
+```
+
+Encouraginly there is still no major differences in expression based on the plate position, or the source donor of cells with this stratified set of eTACs.
+
+```{r, echo=FALSE, result='asis'}
+table(aire.de.res$Diff)
+```
+
+It also seems there are not many overall expression differences between the 21 _AIRE_ positive and 50 _AIRE_ negative cells.  This is partly to be expected due to the small sample size, which reduces our statistical power.  The bonus is that with so few genes we can feasibly have a look at what they are, and most importantly see what the distribution of their tissue-restricted expression is.
+
+```{r, echo=FALSE}
+aire.de.res$gene_id <- rownames(aire.de.res)
+aire.symbol <- merge(x=aire.de.res, y=gene_symbol, by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+aire.tau <- merge(aire.symbol, tra.df[, (dim(tra.df)[2]-5):(dim(tra.df)[2])],
+                  by.x='gene_id', by.y='ensembl.gene', all.x=TRUE)
+
+gene.labels <- aire.tau$symbol
+gene.labels[aire.tau$logFC < 4.5 & aire.tau$logFC > -4.5] <- ""
+
+ggplot(aire.tau, aes(x=AveExpr, y=logFC, colour=Sig)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_Publication() +
+  labs(x=expression(paste("Mean log"[2], " Expression")),
+       y=expression(paste("log"[2], " Fold Change"))) +
+  guides('colour'=guide_legend(title="Statistically significant")) +
+  geom_text_repel(aes(label=gene.labels),
+                  nudge_x=0.1,
+                  colour='black')
+```
+
+
+The first thing that jumps out of this MA-plot is that the up-regulated genes are all reasonably lowly expressed!  This might be an indication that these are tissue-restricted as TRAs are generally more lowly expressed than other sets of genes.  Intriguingly the set of genes that are down-regulated in the _AIRE_ positive cells are more highly expressed.  I'm not sure what to make of this initially, we'll need to see what those genes are.
+
+```{r, echo=FALSE}
+ggplot(aire.tau, aes(tau, colour=Diff)) +
+  geom_density() +  theme_mike() +
+  scale_colour_Publication() +
+  labs(x="Tau", y="Density")
+```
+
+There is a very subtle, but perceptible, shift in the tissue restricted expression between the up- and down-regulated genes between the _AIRE_ positive and negative human eTACs.  Specifically, the up-regulated genes in the _AIRE_ positive cells are less likely to have a tissue-restricted pattern of expression than the _AIRE_ down-regulated genes.  This runs counter to our expectation that _AIRE_ releases TRAs from transcriptional repression and allows their promiscuous expression.  It is worth noting that the genes that are _not_ differentially expressed are most likely to have the least tissue-restricted pattern of expression than either of the differentially expressed sets of genes.  Finally, let's see what these particular genes are, and see which tissues they have the greatest expression in.
+
+```{r, results='asis', echo=FALSE}
+knitr::kable(aire.tau[aire.tau$Diff != 0, c(1:3,6,9,12,15)])
+```
+
+First the genes that are classed as `Tissue-Restricted`.
+
+```{r, echo=FALSE, results='asis'}
+# select tissue that has the maximum expression for each gene in the FANTOM5 data
+fantom.exprs <- tra.df[, 3:(dim(tra.df)[2]-6)]
+# remove the cell line column
+fantom.exprs <- fantom.exprs[, -(which(colnames(fantom.exprs) == "Cell.line"))]
+rownames(fantom.exprs) <- tra.df$GeneID
+aire.genes <- aire.tau[aire.tau$Diff != 0, c(1:3,6,9,12,15)]$gene_id
+max.genes <- apply(fantom.exprs, 1, max)
+gene.tissue <- list()
+for(i in 1:length(aire.genes)){
+  gene.name <- max.genes[aire.genes[i]]
+  fant.vec <- fantom.exprs[aire.genes[i], ]
+  max.col <- which(fant.vec == gene.name, arr.ind=TRUE)[2]
+  if(!is.na(max.col)){
+    gene.tissue[[aire.genes[i]]] <- names(fant.vec[max.col])
+  }
+}
+tissue.df <- as.data.frame(cbind(unlist(gene.tissue)))
+colnames(tissue.df) <- c("Tissue")
+tissue.df$gene_id <- rownames(tissue.df)
+
+aire.tissue <- merge(aire.tau, tissue.df, by='gene_id')
+knitr::kable(aire.tissue[aire.tissue$Diff != 0 & aire.tissue$GeneGroup == "Tissue-Restricted", c(1:3,6,9,12,15, 16)])
+```
+
+Six genes show a tissue-restricted expression pattern, and the tissue/cell type where they have the highest expression is shown in the `Tissue` column.  Three are up-regulated and three are down-regulated.  _LGALS2_, which is down-regulated in _AIRE_ positive eTACs, is a leptin binding protein and is found as a homodimer which can bind to Lymphotoxin-$\alpha$, so perhaps is not so surprising to see it expressed in these DC-like cells.  Like-wise _CLDN3_ (Claudin 3), which is up-regulated, is expressed in lymphocytes and is implicated in immune cell transmigration, so is perhaps not so surprising.  The other genes, _CCR6_, _CCL19_ and _CSF2RA_ are immune-cell specific genes are should perhaps be expected in these cells.  Finally, _AIRE_ is our other tissue-restricted gene found in these cells; this is a good sanity check that we see _AIRE_ as the most highly up-regulated gene in our _AIRE_ positive cells.
+
+`Constituitive` genes.
+
+```{r, echo=FALSE, results='asis'}
+knitr::kable(aire.tissue[aire.tissue$Diff != 0 & aire.tissue$GeneGroup == "Constituitive", c(1:3,6,9,12,15, 16)])
+```
+
+The gene that jumps out here is _STAT3_, which is down-regulated in the _AIRE_ positive cells.  _FTH1_ encodes a heavy subunit of Ferritin involved in iron storage and _EIF1_ is a translation initiation factor.
+
+
+`Misc` genes.
+
+```{r, echo=FALSE, results='asis'}
+knitr::kable(aire.tissue[aire.tissue$Diff != 0 & aire.tissue$GeneGroup == "Misc", c(1:3,6,9,12,15, 16)])
+```
+
+The only thing that jumps out the most here is _DNMT3A_, a methyltransferase involved in _de novo_ DNA methylation.
+
+## Initial conclusions
+
+### Data quality
+
+Firstly, the quality of the data are fairly good; more than 2/3rds of the cells are useable.  Unfortunately the multi-cell control library failed, and there appeared to be some material in 2 of the 4 negative wells.  On the plus side only one of those empty wells passed the other QC steps, and still had quite a low library size.  Although I have not shown it here, the mapping rates for cells was generally good, and there was a range of library sizes; 100K - 2M+, within the range for many single cell experiments.
+
+The biggest concern up to this point is the lack of detectable _EPCAM_ expression in these cells, given it was used as a gating marker.  There is also the intriguing observation of _CD19_ expression, which Jo reports she has also seen in the bulk RNAseq data.  Tolerogenic CD19+ splenic DCs that provide _IDO_ dependent T cell surpression have been described in mice (Mellor _el al_ J.Immunol 2005, pp5601-5).  A large group of these eTACs/DCs express _IDO_, which may suggest that these cells are acting in a tolerogenic fashion via secreted factors, rather than presentation of endogenous TRAs.  I do not, however, believe they are exactly the same population as the mouse tolerogenic DCs given tha  _CD19_ is limited to a small proportion of cells, and they lack expression of _TLR9_, which is required for CpG-dinucelotide induction of _IDO_ in mouse Cd19+ tolerogenic DCs.
+
+### Cell clustering and marker genes
+There are arguably two groups of cells in these eTACs, which I would say provides some nice validation of applying single cell techniques to these types of cells.  From the differential expression analysis we have quite a range of genes that might be used as potential markers to separate them out, including cell surface markers such as _CD200_, _CD48_, _CD11c_, _CCR7_ and _FCER1G_.  Thre presence of Fc$\epsilon$R1$\gamma$ is intriguing, as it suggest these cells may be capable of responding to the humoral immune system, such as via opsonised Abs bound to cognate ligand, which would fit with their expression of other Fc receptors.  There is more that can be done in this analysis to test the robustness of these cell clusterings, such as bootstrapped resampling with clustering.  There is also the presence of a potential intermediate population of cells.  I need to check whether these cells represent some bridging population between the two eTAC groups, or represent a technical artifact of the data (i.e. cells that _just_ pass QC).
+
+### _AIRE_ expression and promiscuous gene expression
+
+The limited expression of _AIRE_ (25/217) cells suggests that this is not a standard characteristic of these cells in a steady state.  Rather _AIRE_ expression may be acquired in these cells following some environmental stimulus of, currently, unknown nature.  The role of these cells as tolerogenic via expression of endogenously expressed TRAs also takes a blow, as there is no convincing evidence that they express more TRAs than would be expected for any peripheral tissue.  Whilst this currently is not tested formally, the comparison with both peripheral tissue ($\alpha$ islets) and our gold standard for promiscuous gene expression, medullary thymic epithelial cells, suggests it is not a function of these cells.  Comparing the proportion of TRAs expressed in mouse eTACs, we can see that they lie intermediate between peripheral tissues and mTECs, which we might expect from a limited degree of pGE.  I conclude that the current evidence does not suggest these cells are capable of endogenous TRA expression in a resting state.  This is supported by the lack of any tissue representation or TRA expression outside of lymphoid and myeloid lineages in the comparison of _AIRE_ positive and negative cells.
+
+This does of course raise serveral important questions; just what is _AIRE_ doing in these cells, how is it acquired, and what is regulating it's presence/absence?  Further, does _AIRE_ in these cells play any role in their hypothesised tolerogenic function?
+
+## Unresolved questions
+There are currently two main unresolved analyses; the impact of the cell cycle on cellular heterogeneity, and the nature of the two (maybe three?) different groups of cells.  The cell cycle is a common source of heterogeneity in single cell experiments, however, DCs are not highly proliferative cells so I would not expect it to have a significant impact on these results.
+
+The second question is perhaps more interesting.  Firstly the relationship between the two cell groups should be addressed, along with the intriguing intermediate population of cells.  These may represent two different states of a single cell type, or a transition from a progenitor to a more mature cell.  To address this we can try to create an ordering of cells along a trajectory defined by their transcriptional profiles, called a pseudotemporal ordering.  This may also give us some more clues about whether _AIRE_ is acquired following a particular environmental cue if these cells are enriched at either end of the ordering.

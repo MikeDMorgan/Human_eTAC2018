@@ -1,0 +1,1572 @@
+---
+title: 'Human eTACs: a developmental or stimulation trajectory?'
+output: html_notebook
+---
+
+## Introduction
+There are two reasonably distinct groups within the human eTAC data, but there are still intermediary cells between the two.  I'd like to know if these two groups represent different states of the same cell type, and thus some sort of stimulatory or developmental trajectory.  I'll use a diffusion map approach implemented in `destiny`, to infer the pseudotemporal trajectory of these cells. 
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(goseq)
+#library(scater)
+#library(scran)
+library(vegan)
+library(Rtsne)
+library(destiny)
+library(ggplot2)
+library(lsa)
+library(biomaRt)
+library(reshape2)
+library(pheatmap)
+library(flashClust)
+library(destiny)
+library(cowplot)
+library(stringr)
+library(WGCNA)
+library(scales)
+#library(org.Hs.eg.db)
+library(KEGG.db)
+library(ggrepel)
+source('~/Dropbox/R_sessions/Clustering/CosineKNN.R')
+source("~/Dropbox/R_sessions/GGMike/theme_mike.R")
+source("~/Dropbox/R_sessions/SingleCellFunctions/single_cell_functions.R")
+
+etacs.meta <- read.table("~/Dropbox/ETACS/human_eTAC-metadata.tsv",
+                         h=T, sep="\t", stringsAsFactors=F)
+
+etacs <- read.table("~/Dropbox/ETACS/human_eTAC-SFnorm.tsv",
+                    h=T, sep="\t", stringsAsFactors=F)
+rownames(etacs) <- etacs$gene_id
+etacs <- etacs[, 2:(dim(etacs)[2]-1)]
+etacs <- etacs[, colnames(etacs) %in% etacs.meta$Sample]
+
+# vars <- apply(etacs, 1, var, na.rm=TRUE)
+# top.genes <- names(vars[order(vars, decreasing=T)][1:128])
+# etacs.hvg <- etacs[top.genes, ]
+top.genes <- read.table("~/Dropbox/ETACS/human_etac-HVG.tsv",
+                        h=T, stringsAsFactors=F, sep="\t")
+etacs.hvg <- etacs[rownames(top.genes)[top.genes$x], ]
+```
+
+I'll use the 128 most variable genes that I defined previously, which were a subset of the 2000 used to perform the cell clustering previously.  I suspect I may need to use a few more genes to get something more meaningful, as more genes = more information up to a limit, when more genes = more noise, but this is a good starting point.
+
+First I'll construct a diffusion map of the cells from their transition probabilities, i.e. what is the probability of stepping from one cell to another.  Cells that are closer together have a higher transition probability, and are thus more likely to be close to each other in a pseudotime.
+
+The number of nearest neighbours can have a big impact, so I'll need to optimise this.
+
+```{r, echo=FALSE}
+set.seed(42)
+test.dm <- DiffusionMap(t(etacs.hvg), n_eigs=15, k=30, distance='cosine')
+plot(eigenvalues(test.dm), pch=20)
+plot(test.dm)
+```
+
+Now that does look interesting.  There might be two branches of cells here... It's not immediately clear how many eigengenes we need to capture this relationship, perhaps 2 or 3 will suffice.  There is a bit of a step between the 2nd and 3rd eigenvalue, so I'll use the first 3 for the pseudotime construction.
+
+```{r, echo=FALSE}
+etac.dm <- DiffusionMap(t(etacs.hvg), n_eigs=3, k=21, sigma="local",
+                        distance='cosine', density_norm=TRUE)
+etac.dpt <- DPT(etac.dm)
+etac.dc <- do.call(cbind.data.frame, list("DC1"=etac.dpt$DC1,
+                                          "DC2"=etac.dpt$DC2,
+                                          "DC3"=etac.dpt$DC3,
+                                          "DPT1"=etac.dpt$DPT1,
+                                          "DPT2"=etac.dpt$DPT2,
+                                          "DPT3"=etac.dpt$DPT3))
+etac.dc <- as.data.frame(etac.dpt)
+#colnames(etac.dc) <- paste0("DC", 1:dim(etac.dc)[2])
+rownames(etac.dc) <- colnames(etacs.hvg)
+etac.dc$Sample <- colnames(etacs.hvg)
+etac.dc$Branch <- as.factor(etac.dpt$Branch)
+dc.merge <- merge(etac.dc, etacs.meta, by='Sample', all.x=TRUE)
+
+# switch away from using WGCNA
+clust.cols <- c("blue", "turquoise")
+dc.merge$Cluster[dc.merge$Cluster == 1] <- "blue"
+dc.merge$Cluster[dc.merge$Cluster == 2] <- "turquoise"
+
+write.table(dc.merge,
+            "~/Dropbox/ETACS/human_eTAC-DiffusionPseudotime.tsv",
+            sep="\t", quote=F, row.names=F)
+```
+
+
+```{r, echo=FALSE, fig.height=7.5, fig.width=7.5}
+col.map <- col2hcl(unique(dc.merge$Cluster))
+names(col.map) <- (unique(dc.merge$Cluster))
+
+dc.p <- ggplot(dc.merge, aes(x=DC1, y=DC2, colour=Cluster)) +
+  geom_point() + theme_mike() +
+  scale_colour_manual(values=col.map)
+  #scale_colour_Publication()
+  #scale_colour_distiller(palette="RdYlBu")
+
+dc1.p.dens <- ggplot(dc.merge, aes(DC1, colour=Cluster)) +
+  geom_density(alpha=0.3) + theme_mike() +
+  scale_colour_manual(values=col.map)
+  #scale_colour_Publication()
+
+
+dc.p.branch <- ggplot(dc.merge, aes(x=DC1, y=DC2, colour=Branch)) +
+  geom_point() + theme_mike() +
+  #scale_colour_manual(values=col.map)
+  scale_colour_Publication()
+  #scale_colour_distiller(palette="RdYlBu")
+
+dc1.p.dens.branch <- ggplot(dc.merge, aes(DC1, colour=Branch)) +
+  geom_density(alpha=0.3) + theme_mike() +
+  #scale_colour_manual(values=col.map)
+  scale_colour_Publication()
+
+plot_grid(dc.p, dc1.p.dens, dc.p.branch, dc1.p.dens.branch,
+          ncol=2)
+
+```
+
+This looks very interesting.  We appear to be able to construct a branching trajectory from the data, which fits with the picture we saw from the original hierarchical clustering (blue and turquoise colouring), and the dimensionality reduction.  Ultimately, these approaches are all related to each other.
+
+Running this with k=10 and k=20 for the nearest neighbours give qualitatively the same result, so that aspect at least seems to be fairly robust.  There is a strange side population along one branch, which might be worth investigating further later.
+
+What we cannot infer from this trajectory, is which population represents the most/least mature or progenitor-like/ground state.  If we look at which genes are expressed along each branch, we might get an idea of the features that are driving these trajectories.
+
+The `destiny` package can also try to identify the branches automatically, based on the change in correlation along a trajectory.
+
+```{r, echo=FALSE}
+plot(etac.dpt, root=3, paths_to=c(1, 2), col_by='branch', pch=20)
+```
+
+If this pseudotime represents the genuine biological relationship between these human eTACs, then we might expect to see groups of cells that are "meta stable", forming regions of higher density along the diffusion component, with sparser regions between that represent the transitioning cells.  If this is the case, we can detect genes that are differentially expressed between the meta-stable populations, and we would expect them to either form a contiuous pattern of expression, or exhibit a switch-like behaviour.  The latter may be of interest if cells are making fate-choices dictated by gene expression dynamics.
+
+I will define four groups of cells along the most discriminatory diffusion component as the regions of greatest cellular density.
+
+```{r, echo=FALSE, fig.height=3.5, fig.width=8}
+set.seed(42)
+meta.states <- kmeans(etac.dc[, c("DPT1")], centers=4)
+dc.merge$MetaState <- factor(meta.states$cluster,
+                             levels=c(1, 3, 4, 2),
+                             labels=c("blue", "brown","turquoise", "yellow"))
+
+meta.map <- col2hcl(unique(dc.merge$MetaState))
+names(meta.map) <- (unique(dc.merge$MetaState))
+
+write.table(dc.merge,
+            file="~/Dropbox/ETACS/human_eTAC_pseudotime-metadata.tsv",
+            sep="\t")
+
+meta.dc <- ggplot(dc.merge, aes(x=DC1, y=DC2, colour=MetaState)) +
+  geom_point(size=3, alpha=0.6) + theme_mike() +
+  scale_colour_manual(values=meta.map) +
+  guides(colour=FALSE)
+
+meta.dens <- ggplot(dc.merge, aes(DC1, colour=MetaState)) +
+  geom_density() + theme_mike() +
+  scale_colour_manual(values=meta.map) +
+  guides(colour=FALSE)
+
+dc.grid <- plot_grid(meta.dc, meta.dens, ncol=2)
+
+ggsave(dc.grid,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Pseudotime_panels.png",
+       width=9.75, height=4.25, dpi=300)
+
+dc.grid
+```
+
+```{r, echo=FALSE}
+table(dc.merge$MetaState)
+```
+
+
+I'll test for differentially expressed genes between the blue cells and each of the other cell groups, then the two extreme populations of yellow and turquoise.  This latter analysis should largely recapitulate the differential expression analysis I performed previously between the two clusters of cells in the dimensionality reduction plots.
+
+
+### Differential expression analysis along inferred pseudotime
+
+```{r, echo=FALSE}
+# remove cells that have no branch assignment?
+design.mat <- model.matrix(~ PlateRow + Donor + MetaState, data=dc.merge)
+
+# fit a linear model
+fit <- limma::lmFit(etacs[,colnames(etacs) %in% dc.merge$Sample], design.mat)
+fit <- limma::eBayes(fit)
+sum.res <- summary(limma::decideTests(fit))
+
+knitr::kable(sum.res)
+```
+
+As in the previous differential expression analysis the spatial plate effects and donors do not contribute much to the differences in expression thankfully.  The last three columns show the number of differentially expressed genes between the `blue` group of cells and the other 3 groups.  Therefore changes are interpreted relative to the `blue` cells.  As we might expect, the `turquoise` cells have the most differentially expressed genes, and the  `brown` have the least, with the `yellow` cells somewhere in between.
+
+Let's take a look at these analyses separately.
+
+#### `Blue` vs. `turquoise` cells
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=6.5}
+ensembl <- useEnsembl(biomart='ensembl', dataset='hsapiens_gene_ensembl', GRCh=37)
+
+gene_symbol <- getBM(attributes=c('ensembl_gene_id', 'external_gene_name'),
+                     filters='ensembl_gene_id', mart=ensembl,
+                     values=rownames(etacs))
+
+de.res.turq <- limma::topTable(fit, coef="MetaStateturquoise", n=Inf, sort="p", p=1.0)
+de.res.turq$Sig <- 0
+de.res.turq$Sig[de.res.turq$adj.P.Val <= 0.01] <- 1
+de.res.turq$Sig <- as.factor(de.res.turq$Sig)
+
+de.res.turq$Diff <- 0
+de.res.turq$Diff[de.res.turq$logFC < 0 & de.res.turq$Sig == 1] <- -1
+de.res.turq$Diff[de.res.turq$logFC > 0 & de.res.turq$Sig == 1] <- 1
+
+
+de.res.turq$gene_id <- rownames(de.res.turq)
+de.merge.turq <- merge(de.res.turq, gene_symbol,
+                       by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+gene.top.turq <- de.merge.turq$external_gene_name
+gene.top.turq[de.merge.turq$logFC > -6.5 & de.merge.turq$logFC < 6.5] <- ""
+gene.top.turq[is.na(gene.top.turq)] <- ""
+
+write.table(de.merge.turq,
+            file="~/Dropbox/Reports_eTAC/Blue_vs_turquoise-pseudotime-DEgenes.tsv",
+            sep="\t", row.names=F, quote=F)
+
+ggplot(de.merge.turq, aes(x=AveExpr, y=logFC, colour=Sig)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_Publication() +
+  labs(x=expression(paste("Mean log"[2], " Expression")),
+       y=expression(paste("log"[2], " Fold Change"))) +
+  guides('colour'=guide_legend(title="Statistically significant")) +
+  ylim(c(-10, 10)) +
+  geom_text_repel(aes(label=gene.top.turq),
+                  colour='black',
+                  nudge_x=0.15,
+                  nudge_y=0.5)
+```
+
+A lot of these genes are the same ones that are differentially expressed between the two main clusters of cells (the directions are reversed because the reference and test group are the other way around).  Generally speaking, the fold changes appear to be larger, but that might be due to sampling variance.  Alternatively the naive analysis of the two clusters previously contained cells that did not have such large differences between them, dampending some of the effects.  This should be evident when we look at what the pattern of expression is along the pseudotime, i.e. is it a slow increasing or decreasing gradient, or a discrete change in expression?
+
+I want to see if there are clear modules of co-expression in these differentially expressed genes that might be of interest.  We might expect to see two clear clusters of up- and down-regulated genes, but it will be interesting to see if there is any more complexity of this indicative of co-ordinated changes in expression.
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5}
+annot.columns <- data.frame(cbind(as.character(dc.merge$MetaState)))
+rownames(annot.columns) <- dc.merge$Sample
+colnames(annot.columns) <- c("MetaState")
+
+row.cols <- col2hcl(unique(annot.columns$MetaState))
+names(row.cols) <- unique(annot.columns$MetaState)
+
+de.genes.turq <- de.merge.turq$gene_id[de.merge.turq$Sig == 1]
+etacs.de.turq <- etacs[de.genes.turq, ]
+
+turq.cor <- cor(t(etacs.de.turq), method='spearman')
+turq.dist <- as.dist(abs(turq.cor - 1))
+turq.clust <- flashClust(turq.dist, method="average")
+turq.cut <- cutreeDynamicTree(turq.clust, deepSplit=FALSE, minModuleSize=50)
+turq.cols <- labels2colors(turq.cut + 5)
+
+turq.annot <- data.frame(cbind(turq.cols))
+rownames(turq.annot) <- de.genes.turq
+colnames(turq.annot) <- "Cluster"
+turq.annot$Cluster <- as.factor(turq.annot$Cluster)
+psorder <- dc.merge$Sample[order(dc.merge$DC1, decreasing=FALSE)]
+
+turq.annot.cols <- col2hcl(unique(turq.cols))
+names(turq.annot.cols) <- unique(turq.cols)
+
+pheatmap(etacs.de.turq[, psorder],
+         show_colnames=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, cluster_rows=TRUE,
+         annotation_row=turq.annot,
+         annotation_col=annot.columns,
+         annotation_colors=list("Cluster"=turq.annot.cols,
+                                "MetaState"=row.cols),
+         clustering_distance_rows=turq.dist,
+         clustering_method="average")
+```
+
+It looks like most of the differentially expressed genes fall onto some sort of spectrum of expression, rather than discrete switch-like changes.  This partly reinforces the notion that these cells fall on a contiunuum, rather than discrete cell types.  Let's have a look at the co-expression network for these differentially expressed genes to see if there are any obvious co-ordinated changes.
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5}
+pheatmap(turq.cor,
+         show_rownames=FALSE, show_colnames=FALSE,
+         cluster_rows=TRUE, cluster_cols=TRUE,
+         clustering_distance_cols=turq.dist,
+         clustering_distance_rows=turq.dist,
+         clustering_method="average",
+         annotation_col=turq.annot,
+         annotation_row=turq.annot,
+         annotation_colors=list("Cluster"=turq.annot.cols))
+```
+
+There are two big clusters of genes, which is to be expected for a group of up-regulated and down-regulated genes.  There might be some more interesting patterns of expression in the purple and greenyellow clusters of genes.  The purple cluster of genes especially has some interestingly high correlations with genes in the greenyellow cluster.  Perhaps some functional enrichment testing of each cluster will shed a little light on what is going on here exactly.
+
+#### Black cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+all.genes <- rownames(etacs)
+
+gene.tpm <- read.table("~/Dropbox/ETACS/human_etacs/eTAC-8-1.quant", sep="\t",
+                       h=T, stringsAsFactors=F)
+gene.length <- gene.tpm$Length[unique(gene.tpm$Name) %in% unique(all.genes)]
+names(gene.length) <- intersect(unique(gene.tpm$Name) , unique(all.genes))
+
+
+black.genes <- rownames(turq.annot)[turq.annot$Cluster == "black"]
+magenta.genes <- rownames(turq.annot)[turq.annot$Cluster == "magenta"]
+pink.genes <- rownames(turq.annot)[turq.annot$Cluster == "pink"]
+red.genes <- rownames(turq.annot)[turq.annot$Cluster == "red"]
+purple.genes <- rownames(turq.annot)[turq.annot$Cluster == "purple"]
+greenyellow.genes <- rownames(turq.annot)[turq.annot$Cluster == "greenyellow"]
+
+de.big.vector <- as.integer(unique(all.genes) %in% unique(black.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(black.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+There is a strong IFN-$\gamma$ response in this cluster of genes that are up-regulated in the `brown` and `turquoise` cells.  Unfortunately we lack the information as to why these patients had their tonsils removed, however, one can speculate that tonsilitis was a principal factor.  Thus, is this change in expression and the continuum of cells that we observe a direct consequence of an inflammatory state in the tonsils of these children?
+
+
+#### Pink cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(pink.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(pink.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+There are lot's of very general terms enriched relating to immune response.  This seems contiguous with the black cluster of genes above, however, these are genes that are anti-correlated with the black genes.  Perhaps this represents genes that are down-regulated upon immune activation, or it represents the start of an inflammatory resolution process?  I think the former is more likely as they are strongly down-regulated in the `brown` and `turqoise` cells compared to the `yellow` and `blue` ones.
+
+#### Magenta cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(magenta.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(magenta.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+No enrichments in this cluster.  It is perhaps not too surprising as it looks more like a subset of a large cluster with the greenyellow genes.  Let's look at them next, perhaps combining them together will yield some answers.
+
+#### Greenyellow cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(greenyellow.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(greenyellow.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+OK, lets try a combined approach with the greenyellow and magenta genes together...
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+comb.genes <- union(magenta.genes, greenyellow.genes)
+
+de.big.vector <- as.integer(unique(all.genes) %in% unique(comb.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(comb.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+OK, there is nothing that Functional enrichment testing can pull out of these combined clusters.  This doesn't mean they are not of biological interest or relevance.  These might be genes that are responding to a number of different stimuli.  It is worth noting that they are only moderately expressed in the `brown` and `turqoise` cells, which then declines as we merge into the `blue` and `yellow` cells.
+
+#### Red cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(red.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(red.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+This looks interesting, a very strong enrichment for B cell activation and phagocytosis.  So, these cells are capable of phagocytosing?  I wonder what the significance of the lymphocyte and leukocyte differentiation terms is?  Does this hint at their ability to induce Tregs?
+
+#### Purple cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(purple.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(purple.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+Nada.
+
+### `Blue` vs. `brown` cells differential expresssion
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=6.5, warning=FALSE, message=FALSE}
+de.res.brun <- limma::topTable(fit, coef="MetaStatebrown", n=Inf, sort="p", p=1.0)
+de.res.brun$Sig <- 0
+de.res.brun$Sig[de.res.brun$adj.P.Val <= 0.01] <- 1
+de.res.brun$Sig <- as.factor(de.res.brun$Sig)
+
+de.res.brun$Diff <- 0
+de.res.brun$Diff[de.res.brun$logFC < 0 & de.res.brun$Sig == 1] <- -1
+de.res.brun$Diff[de.res.brun$logFC > 0 & de.res.brun$Sig == 1] <- 1
+
+
+de.res.brun$gene_id <- rownames(de.res.brun)
+de.merge.brun <- merge(de.res.brun, gene_symbol,
+                       by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+gene.top.brun <- de.merge.brun$external_gene_name
+gene.top.brun[de.merge.brun$logFC > -5 & de.merge.brun$logFC < 5] <- ""
+gene.top.brun[is.na(gene.top.brun)] <- ""
+
+write.table(de.merge.brun,
+            file="~/Dropbox/Reports_eTAC/Blue_vs_brown-pseudotime-DEgenes.tsv",
+            sep="\t", row.names=F, quote=F)
+
+
+ggplot(de.merge.brun, aes(x=AveExpr, y=logFC, colour=Sig)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_Publication() +
+  labs(x=expression(paste("Mean log"[2], " Expression")),
+       y=expression(paste("log"[2], " Fold Change"))) +
+  guides('colour'=guide_legend(title="Statistically significant")) +
+  ylim(c(-10, 10)) +
+  geom_text_repel(aes(label=gene.top.brun),
+                  colour='black',
+                  nudge_x=0.15,
+                  nudge_y=0.5)
+```
+
+Now perhaps we can start to draw a picture of which genes are initially up-regulated as we move from the `blue` cells into the `brown` cells, and finally through to the `turquoise` cells.  Straight away we can see that _CCR7_, _LAD1_, _ACHE_ and _LAMP3_ are markers for the combined group of `turquoise` _and_ `brown` cells.
+
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5, warning=FALSE, message=FALSE}
+de.genes.brun <- de.merge.brun$gene_id[de.merge.brun$Sig == 1]
+etacs.de.brun <- etacs[de.genes.brun, ]
+
+brun.cor <- cor(t(etacs.de.brun), method='spearman')
+brun.dist <- as.dist(abs(brun.cor - 1))
+brun.clust <- flashClust(brun.dist, method="average")
+brun.cut <- cutreeDynamicTree(brun.clust, deepSplit=FALSE, minModuleSize=10)
+brun.cols <- labels2colors(brun.cut + 5)
+
+brun.annot <- data.frame(cbind(brun.cols))
+rownames(brun.annot) <- de.genes.brun
+colnames(brun.annot) <- "Cluster"
+brun.annot$Cluster <- as.factor(brun.annot$Cluster)
+psorder <- dc.merge$Sample[order(dc.merge$DC1, decreasing=FALSE)]
+
+brun.annot.cols <- col2hcl(unique(brun.cols))
+names(brun.annot.cols) <- unique(brun.cols)
+
+pheatmap(etacs.de.brun[, psorder],
+         show_colnames=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, cluster_rows=TRUE,
+         annotation_row=brun.annot,
+         annotation_col=annot.columns,
+         annotation_colors=list("Cluster"=brun.annot.cols,
+                                "MetaState"=row.cols),
+         clustering_distance_rows=brun.dist,
+         clustering_method="average")
+```
+
+The red cluster of genes looks very interesting, as they are _highly_ specific for the `brown` cells.  I suspect the genes in the black, pink and magenta clusters will overlap strongly with the DE gene clusters from the `turquoise` cell comparison.  Let's take a look at the co-expression of these genes to see if anything jumps out, particularly from that red cluster of genes.
+
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5, warning=FALSE, message=FALSE}
+pheatmap(brun.cor,
+         show_rownames=FALSE, show_colnames=FALSE,
+         cluster_rows=TRUE, cluster_cols=TRUE,
+         clustering_distance_cols=brun.dist,
+         clustering_distance_rows=brun.dist,
+         clustering_method="average",
+         annotation_col=brun.annot,
+         annotation_row=brun.annot,
+         annotation_colors=list("Cluster"=brun.annot.cols))
+```
+
+That is some very strongly correlated genes in the red cluster of genes.  The black and magenta clusters look like they need to be stictched together really, though there are some subtle differences between them; perhaps combine them if they individually are not enriched for any functional enrichment terms.
+
+
+#### Red cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+black.genes <- rownames(brun.annot)[brun.annot$Cluster == "black"]
+#magenta.genes <- rownames(brun.annot)[brun.annot$Cluster == "magenta"]
+pink.genes <- rownames(brun.annot)[brun.annot$Cluster == "pink"]
+red.genes <- rownames(brun.annot)[brun.annot$Cluster == "red"]
+
+de.big.vector <- as.integer(unique(all.genes) %in% unique(red.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(red.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+Err...neurological system development? That is somewhat unexpected to say the least!  What is it about these genes that makes them so important to neuronal differentiation and development?  They are clearly highly co-expressed, what exactly are they doing though?  Is there some morphological change these cells are going through perhaps?  There are 206 genes in this cluster with a _very_ interesting pattern of expression, let's take a look at some of them.
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+n.cells <- dim(etacs)[2]
+n.brun <- length(dc.merge$Sample[dc.merge$MetaState == "brown"])
+red.exprs <- etacs[red.genes, dc.merge$MetaState == "brown"]
+red.exprs$gene_id <- rownames(red.exprs)
+
+red.merge <- merge(red.exprs, gene_symbol, by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+head(red.merge[order(rowMeans(red.merge[, c(2:11)]), decreasing=TRUE), ]$external_gene_name, n=25)
+```
+
+_AIRE_ is in this interesting little cluster of genes in the `brown` cells.
+
+* _CTSC_ encodes cathepsin C, is this related to Cathepsin S that is linked to the processing of autoantigens and self antigens. 
+* _PLAGL1_ encodes  a C2H2 zinc finger protein that acts as a suppressor of cell growth.  
+* _RGPD5_ is a GTP-binding protein, that seems to be linked a variety of cell behaviours and functions.  _RGPD3_, _RGPD6_ and _RGPD8_ are also in the red cluster of genes.  
+* _SEPT11_ encodes Septin 11 which is part of a family of cytoskeletal GTPases involved in vesicle trafficking and cytokinesis.  
+* _SOX4_ is involved in cell-fate decision making, especially during embryonic development; it may also be linked to apoptosis, but it's not clear if this is pro- or anti-apoptotic.  _SOX8_ and _SOX9_ are also in the red cluster of genes.  These 3 SOX genes are located on separate chromosomes, so their co-expression does not appear to be due to synteny on the genome, perhaps they are co-regulated by a common _trans_ factor?  
+* _SPOCK2_ binds to glycosaminocylcans located in the extra-cellular matrix, thus forming part of the ECM.  _TFRC_ encodes the Transferrin receptor involved in cellular iron uptake by receptor-mediated endocytosis, which is required for erythropoiesis and neurologic development.  What is the importance of iron in the role of these cells?  
+* _RCN1_ encodes reticulovalbin 1, an ER lumen calcium binding protein.  
+* _SERF1A_ and _SERF1B_ are encoded on a large duplicated region of 5q13, which may confounded the quantification of their expression; the function of these genes is unknown, but they share low homology with the RNA-binding domains matrin-cyclophilin which colocalizes with snRNPs.  
+* _ADAMDEC1_ encodes a secreted metalloproteinase, which is up-regulated during DC maturation, and may be involved in interactions with germinal center T cells.  
+* _RCL1_ appears to be a ribosomal RNA processing enzyme.  
+* _EPHX1_ encodes epoxide hydrolase 2, which appearently metabolises epoxides to dihydrodiols.  Why is this so strongly up-regulated in these cells?  Is there some burst of metabolism that results in a generation of large amounts of epoxide in these cells?  
+* _PNKD_ encodes a gene thought be involved in myofibrillogenesis, it is not immediately clear what it's function is here.  
+* _TNFRSF11B_ encodes the TNF receptor OPG, a negative regulator of bone resorption by osteoclasts, which has also been linked to lymph node organogenesis in mice.  Other TNF receptor superfamily genes in this red cluster of genes are _TNFRSF11A_, _TNFRSF4_ and _TNFRSF25_.  _TNFRSF11A_ interacts with TRAF proteins and induces the activation of NF$\kappa$B nad MAPK8/JNK, and is an important regulator of T cell-DC interactions.  _TNFRSF4_ encodes the OX40 receptor which is important for interactions with T cells, and involved in T cell activation, including T reg cells.  Perhaps this is part of a complex of proteins important for eTACs to induce regulatory T cells?  _TNFRSF25_ expresses a TNF receptor superfamily protein involved in regulating lymphocyte homeostasis, including stimulation of NF$\kappa$B.  Apparently it may be involved in the removal of self-reactive cells in the mouse thymus, so does it have the same role in these eTACs in the periphery?  
+* _PDLIM4_ encodes a gene linked to bone development, but is otherwise poorly annotated.
+* _SLC5A6_ and _SLC6A5_ encode sodium-dependent ion channels, the latter of which is also involved in clearance of extra-cellular glycine during glycine-mediated neurotransmission.
+
+#### Pink cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(pink.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(pink.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+Nothing enriched in the pink cluster of genes, I suspect thse genes overlap heavily with the DE genes from the `turquoise` cells.  The black and magenta genes are all fairly similar; if there is no strong enrichments I will merge them and see if there are any enrichments with the combined set of genes.
+
+#### Magenta cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+# de.big.vector <- as.integer(unique(all.genes) %in% unique(magenta.genes))
+# names(de.big.vector) <- unique(all.genes)
+# 
+# de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+# 
+# pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+#                  plot.fit=FALSE)
+# GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+#                       method="Wallenius", use_genes_without_cat=T)
+# 
+# GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+# GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(magenta.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+# 
+# # select on p-value and foldEnrich
+# GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+# go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+# 
+# p.enrich <- ggplot(GO.sig.all,
+#                    aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+#                        size=foldEnrich)) +
+#   geom_point() + theme_mike() +
+#   scale_colour_gradient(low="#000000", high="#DC143C")
+# 
+# GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+# 
+# p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+#                   aes(x=reorder(term, 
+#                                 foldEnrich),
+#            y=foldEnrich,
+#            fill=-log10(padjust))) +
+#   scale_fill_distiller(palette="Reds", direction=1) +
+#   geom_bar(stat='identity') + theme_mike() +
+#   coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+# 
+# plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+Ok, now for the black cluster.
+
+#### Black cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=14, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(black.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(black.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+This looks interesting.  We've got immune activation enrichments here, and interestingly granulocyte migration; are these cells actively migrating through the tonsil?
+
+So it looks like the `brown` cells are actively responding to an inflammatory stimulus, and possibly in the process of migrating.  This would fit with their location on the pseudotime as a transitional population of cells between the `turquoise` and `blue` cells.  It is this transitional group of cells in which _AIRE_ is expressed, which suggests there is something very specific about the state of these cells that either induces _AIRE_ expression, or is reliant on it's expression.  Either way these cells are worth looking at in more detail.  I wonder if they are recruited to sites of inflammation, in this case within the tonsil, in order to provide immune-suppression.  If they encounter a self-reactive cell, which is induced into a Treg, would this then help to augment a resolution of inflammation?  Are these cells indispensable to this process, inconsequential, or just an aid?  For instance, if these DCs were blocked from responding (assuming the `brown` cells are a transition from their normal ground state in `blue` to an activated state in `turquoise`), would the inflammatory resolution process take longer, stop entirely, or have no discernable effect whatsoever?
+
+Questions, questions.  Let's finally get to the `yellow` group of cells, before trying to tie all of this together.
+
+
+### `Blue` vs. `yellow` cells differential expresssion
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=6.5, warning=FALSE, message=FALSE}
+de.res.yell <- limma::topTable(fit, coef="MetaStateyellow", n=Inf, sort="p", p=1.0)
+de.res.yell$Sig <- 0
+de.res.yell$Sig[de.res.yell$adj.P.Val <= 0.01] <- 1
+de.res.yell$Sig <- as.factor(de.res.yell$Sig)
+
+de.res.yell$Diff <- 0
+de.res.yell$Diff[de.res.yell$logFC < 0 & de.res.yell$Sig == 1] <- -1
+de.res.yell$Diff[de.res.yell$logFC > 0 & de.res.yell$Sig == 1] <- 1
+
+
+de.res.yell$gene_id <- rownames(de.res.yell)
+de.merge.yell <- merge(de.res.yell, gene_symbol,
+                       by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+gene.top.yell <- de.merge.yell$external_gene_name
+gene.top.yell[de.merge.yell$logFC > -6 & de.merge.yell$logFC < 6] <- ""
+gene.top.yell[is.na(gene.top.yell)] <- ""
+
+write.table(de.merge.yell,
+            file="~/Dropbox/Reports_eTAC/Blue_vs_yellow-pseudotime-DEgenes.tsv",
+            sep="\t", row.names=F, quote=F)
+
+sig.cols <- c("#A49D9D", "#FF0000")
+names(sig.cols) <- c("0", "1")
+
+mac.ma <- ggplot(de.merge.yell, aes(x=AveExpr, y=logFC, colour=Sig)) +
+  geom_point(size=1) + theme_mike() +
+  scale_colour_manual(values=sig.cols) +
+  labs(x=expression(paste("Mean log"[2], " Expression")),
+       y=expression(paste("log"[2], " Fold Change"))) +
+  guides('colour'=guide_legend(title="Statistically significant")) +
+  ylim(c(-10, 10)) +
+  geom_text_repel(aes(label=gene.top.yell),
+                  colour='black',
+                  nudge_x=0.15,
+                  nudge_y=0.15)
+
+ggsave(mac.ma,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/MAplot_yellow_cluster.png",
+       height=4.75, width=4.5*1.618, dpi=300)
+mac.ma
+```
+
+This MA plot looks the majority of differences between the `blue` and `yellow` cells involved an up-regulation of genes, with strong representation of macrophage markers (_MMP9_ and _CD14_), as well as multiple complement components (_C1QA_, _C1QB_, _C1QC_).  This raises the question: are these cells also just responding to the inflammatory state of the tonsils in these individuals? (and what role does _APOE_ have here btw??).  The gene _CPVL_ is down-regulated in all of the cell clusters, indicating that it is quite specific to the `blue` cluster of cells.  This gene encodes a carboxypeptidase previously detected in macrophages and has been genetically linked to diabetic nephropathy and Behcet's, albeit with some pretty shaky evidence.  In human macrophages CPVL protein is glycosylated and probably localises to the ER, though may also concentrate in lamellipodia with MHC molecules and be involved in antigen processing and presentation.
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5, warning=FALSE, message=FALSE}
+de.genes.yell <- de.merge.yell$gene_id[de.merge.yell$Sig == 1]
+etacs.de.yell <- etacs[de.genes.yell, ]
+
+yell.cor <- cor(t(etacs.de.yell), method='spearman')
+yell.dist <- as.dist(abs(yell.cor - 1))
+yell.clust <- flashClust(yell.dist, method="average")
+yell.cut <- cutreeDynamicTree(yell.clust, deepSplit=TRUE, minModuleSize=50)
+yell.cols <- labels2colors(yell.cut + 5)
+
+yell.annot <- data.frame(cbind(yell.cols))
+rownames(yell.annot) <- de.genes.yell
+colnames(yell.annot) <- "Cluster"
+yell.annot$Cluster <- as.factor(yell.annot$Cluster)
+psorder <- dc.merge$Sample[order(dc.merge$DPT1, decreasing=FALSE)]
+
+yell.annot.cols <- col2hcl(unique(yell.cols))
+names(yell.annot.cols) <- unique(yell.cols)
+
+pheatmap(etacs.de.yell[, psorder],
+         show_colnames=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, cluster_rows=TRUE,
+         annotation_row=yell.annot,
+         annotation_col=annot.columns,
+         annotation_colors=list("Cluster"=yell.annot.cols,
+                                "MetaState"=row.cols),
+         clustering_distance_rows=yell.dist,
+         clustering_method="average",
+         filename="~/Dropbox/Reports_eTAC/ms_figure_panels/YellowDE_genes-heatmap.png",
+         height=6.75, width=7.75, res=300)
+```
+
+It looks like quite a lot of genes are specific to the `yellow` cells, and are up-regulated, which fits with the picture in the MA plot above.  It also fits that some genes are down-regulated, but not switched off altogether.
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=7.5, warning=FALSE, message=FALSE}
+pheatmap(yell.cor,
+         show_rownames=FALSE, show_colnames=FALSE,
+         cluster_rows=TRUE, cluster_cols=TRUE,
+         clustering_distance_cols=yell.dist,
+         clustering_distance_rows=yell.dist,
+         clustering_method="average",
+         annotation_col=yell.annot,
+         annotation_row=yell.annot,
+         annotation_colors=list("Cluster"=yell.annot.cols))
+```
+
+The green cluster of genes look very distinct from the others, if there is any functional enrichment then that could be an interesting cluster.  I'll start with thsoe genes.  I'm concerned that the pink cluster of genes should be split in to two clusters.
+
+#### Green cluster of genes
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12.5, warning=FALSE, message=FALSE}
+black.genes <- rownames(yell.annot)[yell.annot$Cluster == "black"]
+magenta.genes <- rownames(yell.annot)[yell.annot$Cluster == "magenta"]
+pink.genes <- rownames(yell.annot)[yell.annot$Cluster == "pink"]
+red.genes <- rownames(yell.annot)[yell.annot$Cluster == "red"]
+green.genes <- rownames(yell.annot)[yell.annot$Cluster == "green"]
+
+de.big.vector <- as.integer(unique(all.genes) %in% unique(green.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(green.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  scale_x_discrete(labels=function(X) str_wrap(X, width=50)) +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+green.go <- plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+
+ggsave(green.go,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Mphage-green_genes-GO.png",
+       height=4.75, width=11.75, dpi=300)
+
+green.go
+```
+
+Wow, that is a very strong and specific enrichment for antigen processing and presentation of _exogenous_ antigen.  Does that mean these `yellow` cells do not express tissue-restricted antigens for the purpose of maintaining peripheral tolerance?  It will be interesting to see if and how TRA expression changes across this pseudotemporal ordering.
+
+#### Black cluster of genes
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(black.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(black.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  scale_x_discrete(labels=function(X) str_wrap(X, width=50)) +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment") +
+  theme(axis.text.y=element_text(size=10))
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+
+That looks like a group of highly related terms.  What process requires targeting of protein to the ER?  Perhaps these are cells responding specifically to a viral infection, hence the need for a tonsilectomey in the first place?  This is a big concern, as it implies that we cannot draw (many) any conclusions about the state and function of the cells under healthy conditions.  I certainly don't imagine it is feasible to get healthy lymph node tissue from volunteers either.
+
+
+#### Magenta cluster of genes
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(magenta.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(magenta.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term,
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  scale_x_discrete(labels=function(X) str_wrap(X, width=50)) +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+magenta.go <- plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+
+ggsave(magenta.go,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Mphage-magenta_genes-GO.png",
+       height=4.75, width=11.75, dpi=300)
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+Nada.  This is the smallest cluster of genes though, so no great surprises.
+
+#### Pink cluster of genes
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(pink.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(pink.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  scale_x_discrete(labels=function(X) str_wrap(X, width=50)) +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+pink.go <- plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+
+ggsave(pink.go,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Mphage-pink_genes-GO.png",
+       height=4.75, width=11.75, dpi=300)
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+This cluster also looks like these are genes involved in responding to a pathogenic insult, i.e. viral tonsilitis.
+
+
+#### Red cluster of genes
+
+```{r, echo=FALSE, fig.height=6.5, fig.width=12.5, warning=FALSE, message=FALSE}
+de.big.vector <- as.integer(unique(all.genes) %in% unique(red.genes))
+names(de.big.vector) <- unique(all.genes)
+
+de.big.vector <- de.big.vector[intersect(names(de.big.vector), names(gene.length))]
+
+pwf.all <- nullp(de.big.vector, "hg38", "ensGene", bias.data=gene.length[intersect(names(de.big.vector), names(gene.length))],
+                 plot.fit=FALSE)
+GO.wall.all <- goseq(pwf.all, genome="hg38", id="ensGene", test.cats=c("GO:BP"),
+                      method="Wallenius", use_genes_without_cat=T)
+
+GO.wall.all$padjust <- p.adjust(GO.wall.all$over_represented_pvalue, method="BH")
+GO.wall.all$foldEnrich <- ((GO.wall.all$numDEInCat/length(unique(red.genes)))/(GO.wall.all$numInCat/length(gene.length)))
+
+# select on p-value and foldEnrich
+GO.sig.all <- GO.wall.all[(GO.wall.all$padjust <= 0.01), ]
+go_cats.all <- data.frame(GO.sig.all$category, GO.sig.all$foldEnrich)
+
+p.enrich <- ggplot(GO.sig.all,
+                   aes(x=foldEnrich, y=-log10(padjust), colour=-log10(padjust),
+                       size=foldEnrich)) +
+  geom_point() + theme_mike() +
+  scale_colour_gradient(low="#000000", high="#DC143C")
+
+GO.all <- GO.sig.all[order(GO.sig.all$padjust, decreasing=FALSE), ]
+
+p.terms <- ggplot(na.omit(GO.all[1:20, ]),
+                  aes(x=reorder(term, 
+                                foldEnrich),
+           y=foldEnrich,
+           fill=-log10(padjust))) +
+  scale_fill_distiller(palette="Reds", direction=1) +
+  geom_bar(stat='identity') + theme_mike() +
+  scale_x_discrete(labels=function(X) str_wrap(X, width=50)) +
+  coord_flip() + labs(x="Gene Ontology Term", y="Fold Enrichment")
+
+plot_grid(p.enrich, p.terms, ncol=2, rel_widths=c(0.8, 1.3))
+```
+
+This looks like a cluster of metabolism genes, perhaps not surprising that these cells would be metabolically active if they are actively involved in responding to an inflammatory/immunological insult of some sort.  What is the significance of the cholesterol efflux, is that a link to prostaglandin synthesis as part of the inflammatory response?  From what I can see the cholesterol efflux might be a response to prostaglandins and or cAMP.
+
+### How does TRA expression change across pseudotime?
+
+We saw that the `brown` cells are those with restricted _AIRE_ expression, and some very specific genes expressed.  This raises the question of whether any of the cells, i.e. the `turquoise` cluster of cells, are post-_AIRE_, and whether there is an informative distribution of TRA expression throughout these cells.
+
+To summarise TRA and promiscuous gene expression generally, I will quantify the proportion of genes expressed in each cell (as a % of their total number of expressed genes), and see how this is distributed along the pseudotime.  Perhaps the `brown` cells will exhibity a greater proportion of TRA expression than other cells?
+
+There are two ways to look at this, as discrete groups of cells, or as a continuous change over pseudotime.  I'll use the first in order to develop the second.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+tra.df <- read.table("~/Dropbox/fantom5/hg19/Human-Tau_TRA_level3.tsv",
+                     h=T, sep="\t", stringsAsFactors=F)
+
+tra.quants <- quantile(tra.df$tau, probs=c(0.25, 0.75), na.rm=TRUE)
+tra.df$GeneGroup <- "Misc"
+tra.df$GeneGroup[tra.df$tau <= tra.quants[1]] <- "Constituitive"
+tra.df$GeneGroup[tra.df$tau > tra.quants[2]] <- "Tissue-Restricted"
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# calculate the proportion of each category expressed in each cells
+cell.id <- colnames(etacs)
+genes <- rownames(etacs)
+genes.list <- list()
+for(i in 1:length(cell.id)){
+  is.exprs <- etacs[, i] >= 1
+  names(is.exprs) <- genes
+  tras <- sum(names(is.exprs)[is.exprs] %in% tra.df$ensembl.gene[tra.df$GeneGroup == "Tissue-Restricted"])
+  cons <- sum(names(is.exprs)[is.exprs] %in% tra.df$ensembl.gene[tra.df$GeneGroup == "Constituitive"])
+  misc <- sum(names(is.exprs)[is.exprs] %in% tra.df$ensembl.gene[tra.df$GeneGroup == "Misc"])
+  genes.list[[cell.id[i]]] <- list("TRA"=tras/sum(is.exprs),
+                                   "Constituitive"=cons/sum(is.exprs),
+                                   "Misc"=misc/sum(is.exprs))
+}
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+genes.df <- as.data.frame(do.call(rbind, genes.list))
+genes.df$Sample <- rownames(genes.df)
+genes.df$TRA <- unlist(genes.df$TRA)
+genes.df$Constituitive <- unlist(genes.df$Constituitive)
+genes.df$Misc <- unlist(genes.df$Misc)
+genes.merge <- merge(genes.df, dc.merge, by='Sample')
+genes.melt <- melt(genes.merge, id.vars=colnames(dc.merge))
+
+ggplot(genes.melt, aes(x=MetaState, y=value, fill=variable)) +
+  geom_bar(stat='identity', position="fill") + theme_mike() +
+  scale_fill_Publication() +
+  labs(x="Pseudotime Cell Cluster", y="Percentage of genes in category")
+```
+
+There is a small increase in the proportion of `Miscellaneous` genes in the yellow cluster of cells, but the relative difference is only a few percent at most.  There definitely doesn't look to be any large changes in the proportions of TRAs that are expressed in these cells.  I'll also take a look at the Human Protein Atlas TRAs Jo sent.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+jo.tra <- read.table("~/Dropbox/ETACS/eTAC_TSA_table-LFC.txt", h=T, sep="\t", stringsAsFactors=F)
+jo.tra$Tissue <- gsub(jo.tra$RNA.TS.FPKM, pattern=": [0-9]+\\.[0-9]+", replacement="")
+etacs$gene_id <- rownames(etacs)
+etacs.exp.merge <- merge(etacs, gene_symbol,
+                         by.x='gene_id', by.y='ensembl_gene_id',
+                         all.x=TRUE)
+
+bulk.tras <- etacs.exp.merge[etacs.exp.merge$external_gene_name %in% jo.tra[, 1],]$gene_id
+
+# calculate the proportion of each category expressed in each cells for Jo's bulk TRAs
+bulk.genes.list <- list()
+for(i in 1:length(cell.id)){
+  is.exprs <- etacs[, i] >= 1
+  names(is.exprs) <- genes
+  tras <- sum(names(is.exprs)[is.exprs] %in% bulk.tras)
+  non.tra <- sum(!names(is.exprs)[is.exprs] %in% bulk.tras)
+  bulk.genes.list[[cell.id[i]]] <- list("TRA"=tras/sum(is.exprs),
+                                        "non.TRA"=non.tra/sum(is.exprs))
+}
+bulk.genes.df <- as.data.frame(do.call(rbind, bulk.genes.list))
+bulk.genes.df$Sample <- rownames(bulk.genes.df)
+bulk.genes.df$TRA <- unlist(bulk.genes.df$TRA)
+bulk.genes.df$non.TRA <- unlist(bulk.genes.df$non.TRA)
+bulk.genes.merge <- merge(bulk.genes.df, dc.merge, by='Sample')
+bulk.genes.melt <- melt(bulk.genes.merge, id.vars=colnames(dc.merge))
+
+ggplot(bulk.genes.melt, aes(x=MetaState, y=value, fill=variable)) +
+  geom_bar(stat='identity', position="fill") + theme_mike() +
+  scale_fill_Publication() +
+  labs(x="Pseudotime Cell Cluster", y="Percentage of genes in category")
+```
+
+There are very few TRAs, just 120 expressed across all eTACs, and there doesn't seem to be any striking difference in the proportions of these TRAs expressed between groups.  Perhaps the TRAs for different tissues are distributed in different regions of the pseudotime, for instance in the `brown` cells, there might be some Aire-dependent TRAs, but not in other cell groups.
+
+
+```{r, echo=FALSE, warning=FALSE, warning=FALSE, message=FALSE}
+bulk.merge <- merge(etacs.exp.merge[etacs.exp.merge$external_gene_name %in% jo.tra[, 1],], jo.tra, by.x='external_gene_name', by.y='Gene')
+bulk.melt <- melt(bulk.merge, id.vars=c("external_gene_name", "gene_id", "Tissue", "RNA.TS.FPKM", "adj.P.Val", "logFC.vs.cDC."))
+bulk.state.merge <- merge(bulk.melt, bulk.genes.melt[, c(1, 2, 3, 226:dim(bulk.genes.melt)[2])], by.x=c("variable"), by.y=c("Sample"))
+```
+
+ 
+```{r, echo=FALSE, fig.width=12.5, warning=FALSE, message=FALSE}
+cell.map <- col2hcl(unique(bulk.state.merge$MetaState))
+names(cell.map) <- (unique(bulk.state.merge$MetaState))
+
+ggplot(bulk.state.merge[bulk.state.merge$value.x > 1, ], 
+       aes(x=Tissue, fill=MetaState)) +
+  #geom_jitter(alpha=0.3, position=position_jitterdodge(dodge.width=1)) + 
+  geom_bar(position="fill") +
+  theme_mike() +
+  scale_fill_manual(values=cell.map) +
+  #scale_colour_Publication() +
+  #scale_fill_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  #facet_grid(. ~ MetaState) +
+  labs(x="TRA Tissue Assignment", y="Percentage of Cells Expressing Tissues TRAs")
+```
+
+The table below shows the number of cells X TRAs for each tissue and cell cluster.  Each entry in the table is the product of the number of TRAs for that tissue and the number of cells that express the TRAs for that tissue.  For example, if there are 20 cells from a cluster that express 3 specific TRAs from kidney, then the count in that cell of the table would be 60.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+knitr::kable(t(table(bulk.state.merge[bulk.state.merge$value.x > 1, ]$MetaState,
+                     bulk.state.merge[bulk.state.merge$value.x > 1, ]$Tissue)))
+```
+
+We can see that the TRAs from the endometrium, gallbladder and ovary are almost entirely restricted to the `blue` and `brown` cells, however, there are only 6, 2 and 4 cells that express genes in these categories respectively, so these are probably not meaningul differences.  Skewed distributions of TRA expressing cell proportions such as for the stomach and adrenal glands might be a bit more interesting as there a good number of cells expressing these tissue's TRAs.  These TRAs include two pepsin precursor peptides, _PGA3_ and _PGA5_ which may be important for lysosomal degradation of phagocytosed particles from the environment.  There is also a very strong skew of cells expressing splenic TRAs in the `yellow` group of cells.  This appears to be down to a single gene, _SPIC_, a transcription factor that is reported to regulate the development of red pulp macrophages.
+
+### Aire co-factor expression
+
+Given the presence of _AIRE_ in just the small `brown` subset of cells, it raises the question whether the known Aire co-factors in mice are also present in thse cells.  Firstly, it must be pointed out that many of these co-factors are part of the polymerase complex, whilst others are common splicing factors, so we should not necessarily be surprised to see them expressed in these cells.  What we want to know, is whether they overlap in expression with _AIRE_ in just a subset of cells.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+aire.cofactors <- c("ENSMUSG00000001440", "ENSMUSG00000003226", "ENSMUSG00000038546", "ENSMUSG00000020290",
+                    "ENSMUSG00000032939", "ENSMUSG00000022672", "ENSMUSG00000026496", "ENSMUSG00000020914",
+                    "ENSMUSG00000005198", "ENSMUSG00000029250", "ENSMUSG00000055065", "ENSMUSG00000027404",
+                    "ENSMUSG00000005370", "ENSMUSG00000041133", "ENSMUSG00000005732", "ENSMUSG00000040463",
+                    "ENSMUSG00000020719", "ENSMUSG00000037275", "ENSMUSG00000022283", "ENSMUSG00000024590",
+                    "ENSMUSG00000071172", "ENSMUSG00000018379", "ENSMUSG00000000731")
+mouse <- useMart("ensembl", dataset="mmusculus_gene_ensembl")
+
+aire.attr <- c("ensembl_gene_id", "hsapiens_homolog_ensembl_gene")
+orth.human <- getBM(aire.attr, filters="with_mmusculus_paralog", values=TRUE,
+                    mart=mouse)
+orth.aire <- orth.human[orth.human$ensembl_gene_id %in% aire.cofactors, ]$hsapiens_homolog_ensembl_gene
+# 14/23 mouse Aire co-factors have 1:1 human paralogs, of which 12 have detectable expression
+etacs.aire.co <- na.omit(etacs[c(orth.aire, "ENSG00000160224"), ])
+aire.names <- orth.human$hsapiens_homolog_ensembl_gene[orth.human$hsapiens_homolog_ensembl_gene %in% rownames(etacs.aire.co)]
+# rownames(etacs.aire.co) <- c(aire.names, "ENSG00000160224")
+aire.symbol <- merge(etacs.aire.co, gene_symbol, by.x='gene_id', by.y='ensembl_gene_id', all.x=TRUE)
+aire.symbol <- aire.symbol[!(duplicated(aire.symbol$external_gene_name)), ]
+rownames(aire.symbol) <- aire.symbol$external_gene_name
+aire.symbol <- aire.symbol[, 2:(dim(aire.symbol)[2] - 1)]
+
+aire.cor <- cor(t(aire.symbol), method='spearman')
+aire.dist <- as.dist(abs(aire.cor - 1))
+aire.clust <- flashClust(aire.dist, method="average")
+
+psorder <- dc.merge$Sample[order(dc.merge$DC1, decreasing=FALSE)]
+
+pheatmap(aire.symbol[, psorder],
+         show_colnames=FALSE, show_rownames=TRUE,
+         cluster_cols=FALSE, cluster_rows=FALSE,
+         annotation_col=annot.columns,
+         annotation_colors=list("MetaState"=row.cols),
+         clustering_distance_rows=aire.dist,
+         clustering_method="average")
+```
+
+Of the mouse Aire co-factors identified none of them are specifically restricted to the `brown` cluster of cells.  There is a strong possibility that _AIRE_ has a role in these cells that is entirely independent of its capacity to promote promiscuous gene expression.  That in itself would also be _very_ interesting.
+
+## Conclusions
+
+The first thing to say is that it appears these cells are actively responding to some inflammatory stimulus, which is probably viral induced tonsilitis.  Thus, the dominant signature across these cells is of an inflammatory response.  This essentially creates a complete confounding between the natural state of these cells with respect to peripheral tolerance, and the data collection.  Any conclusion drawn from these data would have to be heavily caveated by the fact these cells are clearly responding to an inflammatory stimulus.
+
+Given this, there is certainly some very interesting biology going on here, and raises the question of just _what_ is _AIRE_ doing in these cells?!  There is very little evidence of any strong skew towards particular tissues in the different groups of cells along the pseudotime.  I would say that this backs up my previous analysis that these cells are not currently, or perhaps actively, promiscuously expressed tissue restricted antigen genes.  The restriction of _AIRE_ to a specific sub-population of cells indicates it may have some role to play in their response to an inflammatory or viral signal.
+
+
+Let's specifically plot AIRE expression over pseudotime.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# get GOIs
+dpt.df <- do.call(cbind.data.frame,
+                  list("DPT"=etac.dpt$DPT1,
+                       "Sample"=colnames(etacs.hvg)))
+rownames(gene_symbol) <- gene_symbol$ensembl_gene_id
+goi <- c("AIRE", "CCR7", "CCR6", "CCL19", "HLA-DRB1", "CD40", "CD80", "CD86", "CD274")
+ensembl.goi <- gene_symbol$ensembl_gene_id[gene_symbol$external_gene_name %in% goi]
+
+goi.exprs <- as.data.frame(t(etacs[ensembl.goi, -(dim(etacs)[2])]))
+colnames(goi.exprs) <- gene_symbol[ensembl.goi, "external_gene_name"]
+goi.exprs$Sample <- rownames(goi.exprs)
+
+goi.merge <- merge(goi.exprs, dc.merge, by="Sample")
+goi.merge <- merge(goi.merge, dpt.df, by="Sample")
+goi.merge$MetaState <- factor(goi.merge$MetaState,
+                              labels=c("turquoise", "brown", "blue", "yellow"),
+                              levels=c("turquoise", "brown", "blue", "yellow"))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+aire.by.dc <- ggplot(goi.merge, aes(x=DPT1, y=AIRE, fill=AIRE, group=MetaState)) +
+  geom_point(size=4, alpha=0.7, shape=21, width=2) +
+  theme_mike() +
+  scale_fill_distiller(palette="RdYlBu") +
+  geom_rug(sides="b", mapping=aes(y=as.numeric(MetaState),
+                                  colour=MetaState), data=goi.merge,
+           position=position_jitterdodge(),
+           size=2) +
+  scale_colour_manual(values=meta.map) +
+  lims(y=c(-2, 16)) +
+  labs(x="Diffusion Pseudotime", y=expression(paste("log"[2]," Expression"))) +
+  theme(axis.title=element_text(face="plain", size=16)) +
+  guides(colour=FALSE)
+
+ggsave(aire.by.dc,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Aire_by_DC1.png",
+       width=5.75, height=4.25, dpi=300)
+
+aire.by.dc
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+aire.by.dc <- ggplot(goi.merge[goi.merge$MetaState %in% c("brown", "turquoise"), ],
+                     aes(x=DPT, y=AIRE, fill=AIRE, group=MetaState)) +
+  geom_point(size=4, alpha=0.7, shape=21, width=2) +
+  theme_mike() +
+  scale_fill_distiller(palette="RdYlBu") +
+  geom_rug(sides="b", mapping=aes(y=as.numeric(MetaState),
+                                  colour=MetaState), 
+           data=goi.merge[goi.merge$MetaState %in% c("brown", "turquoise"), ],
+           position=position_jitterdodge(),
+           size=2) +
+  scale_colour_manual(values=meta.map) +
+  lims(y=c(-2, 16)) +
+  labs(x="Diffusion Pseudotime", y=expression(paste("log"[2]," Expression"))) +
+  theme(axis.title=element_text(face="plain", size=16)) +
+  guides(colour=FALSE)
+
+aire.by.dc
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=9.75, fig.height=4.25}
+goi.melt <- melt(goi.merge,
+                 id.vars=c(colnames(dc.merge), "DPT"))
+goi.melt$value <- as.numeric(as.character(goi.melt$value))
+goi.melt$variable <- factor(goi.melt$variable,
+                            levels=c("AIRE", "CCR7", "CCL19", "CCR6", "CD274", "CD80",
+                                     "CD86", "CD40", "HLA-DRB1"),
+                            labels=c("AIRE", "CCR7", "CCL19", "CCR6", "PD-L1", "CD80",
+                                     "CD86", "CD40", "HLA-DRB1"))
+
+# just compare the brown and turquoise cells
+goi.by.state <- ggplot(goi.melt[goi.melt$MetaState %in% c("turquoise", "brown", "blue"), ],
+                       aes(x=variable, y=value, fill=MetaState,
+                           group=MetaState)) +
+  geom_jitter(shape=21, alpha=0.75, size=3,
+              position=position_jitterdodge()) +
+  theme_mike() +
+  scale_fill_manual(values=meta.map) +
+  labs(x="Gene", y=expression(paste("log"[2], " Expression"))) +
+  guides(fill=FALSE) +
+  theme(axis.title=element_text(size=16, face="plain"))
+
+ggsave(goi.by.state,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/GOI_by_state.png",
+       width=9.75, height=4.25, dpi=300)
+goi.by.state
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+tra.goi <- c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5", "SOX10", "GAD2", "TH", "CYP11A1")
+
+# get GOIs
+ensembl.tra <- gene_symbol$ensembl_gene_id[gene_symbol$external_gene_name %in% tra.goi]
+
+tra.goi.exprs <- as.data.frame(t(etacs[ensembl.tra, -(dim(etacs)[2])]))
+colnames(tra.goi.exprs) <- gene_symbol[ensembl.tra, "external_gene_name"]
+# add in genes that are not expressed, with all 0 values
+for(i in seq_along(tra.goi)){
+  if(!tra.goi[i] %in% gene_symbol$external_gene_name){
+    tra <- tra.goi[i]
+    no.tra.exprs <- numeric(dim(tra.goi.exprs)[1])
+    tra.goi.exprs[, tra] <- no.tra.exprs
+  }
+}
+tra.goi.exprs$Sample <- rownames(tra.goi.exprs)
+
+tra.goi.merge <- merge(tra.goi.exprs, dc.merge, by="Sample")
+tra.goi.merge <- merge(tra.goi.merge, dpt.df, by="Sample")
+tra.goi.merge$MetaState <- factor(tra.goi.merge$MetaState,
+                                  labels=c("turquoise", "brown", "blue", "yellow"),
+                                  levels=c("turquoise", "brown", "blue", "yellow"))
+
+tra.goi.melt <- melt(tra.goi.merge,
+                 id.vars=c(colnames(dc.merge), "DPT"))
+tra.goi.melt$value <- as.numeric(as.character(tra.goi.melt$value))
+tra.goi.melt$variable <- factor(tra.goi.melt$variable,
+                                levels=c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5",
+                                         "SOX10", "GAD2", "TH", "CYP11A1"),
+                                labels=c("INS1", "TG", "CYP21A2", "CYP1A2", "TPO", "NLRP5",
+                                         "SOX10", "GAD2", "TH", "CYP11A1"))
+
+# just compare the brown and turquoise cells
+tra.by.state <- ggplot(tra.goi.melt[tra.goi.melt$MetaState %in% c("turquoise", "brown", "blue"), ],
+                       aes(x=variable, y=value, fill=MetaState,
+                           group=MetaState)) +
+  geom_jitter(shape=21, alpha=0.75, size=3,
+              position=position_jitterdodge()) +
+  theme_mike() +
+  scale_fill_manual(values=meta.map) +
+  labs(x="Gene", y=expression(paste("log"[2], " Expression"))) +
+  guides(fill=FALSE) +
+  theme(axis.title=element_text(size=16, face="plain"),
+        axis.text.x=element_text(angle=90))
+
+ggsave(tra.by.state,
+       filename="~/Dropbox/Reports_eTAC/ms_figure_panels/Aire_TRAs_by_cluster.png",
+       height=4.25, width=9.75, dpi=300)
+
+tra.by.state
+```
+
+
+
+
+
+

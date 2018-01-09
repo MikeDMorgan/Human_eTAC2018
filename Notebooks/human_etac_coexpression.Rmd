@@ -1,0 +1,186 @@
+---
+title: 'Human eTACs: Co-expression Analysis'
+author: "Mike Morgan"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+## Introduction
+
+We have seen from my previous analysis that there appear to be two groups of eTACs, that are well delineated by expression of _CCR7_, and also _PDL1_.  There is some evidence for expression of specific TRAs, particularly ones that are differentially expressed, from bulk RNA seq experiments, with classic DCs.  We want to know whether the expression of these TRAs overlaps with _AIRE_ expression, and if it does not, what other factors might we be able to identify that do?
+
+Further to these, we would also like to define the co-expression patterns _within_ each eTAC group, to understand what gene regulatory networks are operating in these cells.
+
+The final question to address in these set of analyses, is to try to address the relationshipd between the two eTAC groups.  A possible way to do this is to attempt to reconstruct a trajectory of cells, as a continuum, rather than discrete clusters.
+
+## Methods
+
+For the co-expression analysis, standard correlation measures are often biased downwards by the high sparsity in single cell expression data.  Additionally, we may not necessarily be interested in the magnitude of expression of some genes, only whether they are present in the same cells or not.  To this end it is probably more informative to use a measure such as the Jaccard coefficient to look at the degree of overlap between sets of cells for each pair of genes of interest.
+
+For the pseudotime trajectory I will use the diffusion map approach, implemented in `dpt`.
+
+## Results
+
+First things first, convert all gene expression values into binary vectors, given some expression threshold.  Expression is on a $log_2$ scale, so I'll set it to the equivalent of 1 normalised reads per gene, i.e. log2(2) = 1.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(scran))
+suppressPackageStartupMessages(library(timeit))
+suppressPackageStartupMessages(library(vegan))
+suppressPackageStartupMessages(library(Rtsne))
+suppressPackageStartupMessages(library(destiny))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(lsa))
+suppressPackageStartupMessages(library(biomaRt))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library(pheatmap))
+suppressPackageStartupMessages(library(flashClust))
+source('~/Dropbox/R_sessions/Clustering/CosineKNN.R')
+source("~/Dropbox/R_sessions/GGMike/theme_mike.R")
+
+etacs <- read.table("~/Dropbox/ETACS/human_eTAC-SFnorm.tsv",
+                    h=T, sep="\t", stringsAsFactors=F)
+
+etacs.meta <- read.table("~/Dropbox/ETACS/human_eTAC-metadata.tsv",
+                         h=T, sep="\t", stringsAsFactors=F)
+n.cells <- dim(etacs)[2] - 2
+etacs.bin <- data.frame(t(apply(etacs[, 2:n.cells + 1],
+                                1, FUN=function(B) binary_convert(B, 1))))
+rownames(etacs.bin) <- etacs$gene_id
+colnames(etacs.bin) <- colnames(etacs)[2:n.cells + 1]
+etacs.bin$external_gene_name <- etacs$external_gene_name
+```
+
+Each gene is represented by a binary vector, indicating whether a gene is expressed in each cell or not.  Now let's look at the overlap in expression between TRAs and _AIRE_. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# select AIRE and the TRAs
+jo.tra <- read.table("~/Dropbox/ETACS/eTAC_TSA_table-LFC.txt", h=T, sep="\t", stringsAsFactors=F)
+jo.tra$Tissue <- gsub(jo.tra$RNA.TS.FPKM, pattern=": [0-9]+\\.[0-9]+", replacement="")
+
+tra.bin <- etacs.bin[etacs.bin$external_gene_name %in% c("AIRE", jo.tra$Gene), ]
+tra.jaccard <- Jaccard(t(tra.bin[, 1:n.cells-1]), binary=TRUE)
+colnames(tra.jaccard) <- etacs.bin$external_gene_name[etacs.bin$external_gene_name %in% c("AIRE", jo.tra$Gene)]
+rownames(tra.jaccard) <- etacs.bin$external_gene_name[etacs.bin$external_gene_name %in% c("AIRE", jo.tra$Gene)]
+
+pheatmap(tra.jaccard,
+         show_colnames=FALSE, show_rownames=FALSE)
+```
+
+
+ The heatmap aboce gives the overlap in expression between all TRAs, and also includes _AIRE_.  Generally Jaccard coefficient values are < 0.4 for _AIRE_, which suggests little overlap with TRAs across all of these eTACs.  The 2 genes with high overlap are _TUBB2A_ and _TUBB2B_, which are syntenic on chromosome 6, but do not overlap.  The other little island of overlapping genes are _LAMP3_, _ACHE_, _EBI3_, _SLC31A2_, _SERPINA1_ and _LRRC37A2_.
+ 
+It is more informative to look at what % of cells also express _AIRE_ for each TRA.  If these are genuinely _AIRE_-dependent, then we would expect to see a high proportion of them also expressing _AIRE_.
+
+```{r}
+# for each TRA, what % also express AIRE?
+tras <- etacs.bin$external_gene_name[etacs.bin$external_gene_name %in% c("AIRE", jo.tra$Gene)]
+aire.coexpress <- list()
+for(i in 1:length(tras)){
+  tra.vec <- tra.bin[tra.bin$external_gene_name == tras[i],
+                     1:n.cells]
+  tra.expr <- tra.bin[, tra.vec == 1]
+  aire.expr <- tra.expr[tra.bin$external_gene_name == "AIRE",]
+  aire.coexpress[[tras[i]]] <- sum(aire.expr)/length(aire.expr)
+}
+
+aire.df <- data.frame(cbind(unlist(aire.coexpress)))
+colnames(aire.df) <- "AireCoExpress"
+aire.df$Gene <- rownames(aire.df)
+
+aire.merge <- merge(aire.df, jo.tra, by='Gene')
+
+ggplot(aire.merge, aes(x=Tissue, y=AireCoExpress, colour=Tissue)) +
+  geom_jitter(alpha=0.6, size=2) +
+  theme_mike() + scale_colour_Publication() +
+  theme(axis.text.x=element_text(angle=90)) +
+  stat_summary(fun.y="median", colour="black", size=2, geom="point", alpha=0.8) +
+  labs(x="Tissue", y="AIRE co-expression")
+```
+
+The plot above shows the percentage of cells that express each TRA, _that also express AIRE_.  If these were/are _AIRE_-dependent TRAs, then one might expect to see a high % of co-expression with _AIRE_.  In actual fact we see very few TRAs that are co-expressed in > 40% of cells (black dots represent the median for that tissue), and the majority are co-expressed in < 20% of cells.  I'll use the mouse thymus single cell data to determine the sorts of levels we would expect for _AIRE_ dependent and independent TRAs.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+mtecs <- read.table("~/Dropbox/Thymus/Thymus_lmfit_corrected.tsv.gz",
+                    sep="\t", h=T, stringsAsFactors=F)
+
+tra.df <- read.table("~/Dropbox/fantom5/Tau_TRA_level3.tsv",
+                     sep="\t", h=T, stringsAsFactors=F)
+
+mtec.tras <- intersect(mtecs$gene_id, tra.df[tra.df$tau >= 0.8, ]$GeneID)
+
+aire.meta <- read.table("~/Dropbox/ETACS/Aire-class.data",
+                        h=T, sep="\t", stringsAsFactors=F)
+n.mtecs <- dim(mtecs)[2] - 1
+
+mtec.bin <- data.frame(t(apply(mtecs[, 1:n.mtecs], 1,
+                               FUN=function(B) binary_convert(B, 1))))
+colnames(mtec.bin) <- colnames(mtecs)[1:n.mtecs]
+rownames(mtec.bin) <- mtecs$gene_id
+mtec.bin$gene_id <- rownames(mtec.bin)
+aire.mtec.coexpress <- list()
+
+for(i in 1:length(mtec.tras)){
+  mtec.vec <- mtec.bin[mtec.tras[i], ]
+  mtec.expr <- mtec.bin[, mtec.vec == 1]
+  aire.mtec <- mtec.expr[mtec.bin$gene_id == "ENSMUSG00000000731",]
+  aire.mtec.coexpress[[mtec.tras[i]]] <- sum(aire.mtec)/length(mtec.expr)
+}
+
+aire.mtec.df <- data.frame(cbind(unlist(aire.mtec.coexpress)))
+colnames(aire.mtec.df) <- "AireCoExpress"
+aire.mtec.df$gene_id <- mtec.tras
+aire.mtec.merge <- merge(aire.mtec.df, aire.meta, by='gene_id', all.x=TRUE)
+aire.mtec.merge$type[is.na(aire.mtec.merge$type)] <- "aire-independent"
+
+ggplot(aire.mtec.merge, aes(x=type, y=AireCoExpress, colour=type)) +
+  geom_jitter(alpha=0.6) +
+  theme_mike() + scale_colour_Publication() +
+  stat_summary(fun.y="median", colour="black", size=2, geom="point", alpha=0.8) +
+  theme(axis.text.x=element_text(angle=90)) +
+  labs(x="Aire Dependency", y="AIRE co-expression")
+```
+
+As we can see from these mouse single mTEC data, the median co-expression between Aire-dependent and -enhanced TRAs (see Sansom _et al_ for details), is > 50%, which is more in keeping with expectation.  The Aire-independent TRAs overlap heavily with _Aire_ in the mouse mTECs, purely because there are so many _Aire_-expressing cells.
+
+There are two points to make at this point.  The first is that if _AIRE_ is inducing TRA expression in the 25 cells that express it, then we might not have the statistical power to detect such sporadic events (assuming pGE is stochastic in the same manner as in the thymus).  The second point is _AIRE_ is not that highly co-expressed with these TRAs, then what is?  This might be an opportunity to identify other controllers of promiscuous gene expression.  Previous studies in the literature have proposed _DEAF1_ and _FEZF2_, but are there any others?
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+etacs.jaccard <- 1 - as.data.frame(as.matrix(vegdist(etacs.bin[, 1:n.cells-1], method="jaccard")))
+rownames(etacs.jaccard) <- rownames(etacs.bin)
+colnames(etacs.jaccard) <- rownames(etacs.bin)
+
+jac.tras <- etacs.jaccard[rownames(etacs.bin)[etacs.bin$external_gene_name %in% tras], ]
+
+pheatmap(jac.tras, show_colnames=F, show_rownames=F)
+```
+
+The genes with the greatest Jaccard coefficient, are those that are expressed uniquitously, or largely in just one of the subpopulations of eTACs, e.g. _TAPBP_, _CD74_, _VIM_, _GRN_ (Granulin precursor).  It might be more efficient to just search for genes that are highly co-expressed with the TRA expressing cells, which are also transcription factors.
+
+
+```{r}
+human.tfs <- read.table("~/Dropbox/Genesets/GO_TF.tsv",
+                        sep="\t", h=T, stringsAsFactors=F)
+tfs <- intersect(rownames(etacs.bin), human.tfs$ensembl_gene_id)
+tfs.bin <- etacs.bin[c(tras, tfs), ]
+tfs.bin <- na.omit(tfs.bin)
+tfs.coexpress <- list()
+
+for(i in 1:length(tras)){
+  tf.vec <- tra.bin[tra.bin$external_gene_name == tras[i], 1:n.cells - 1]
+  tf.expr <- tfs.bin[, tf.vec == 1]
+  tfs.coexpress[[tras[i]]] <- rowSums(tf.expr[, -dim(tf.expr)[2]])/(dim(tf.expr)[2]-1)
+}
+
+tfs.df <- data.frame(do.call(rbind, tfs.coexpress))
+
+pheatmap(tfs.df, show_rownames=F, show_colnames=F)
+```
+
+This heatmap shows the set of transcription factors that are co-expressed with all of the TRAs.  There is a large block of TF genes that are highly co-expressed with all TRAs.  Some of these TRAs will most likely be constituitive transcription factors, like TFIIB, or cell type specific, such as NF$\kappa$B.  Hopefully one or more might be related to promiscuous gene expression of TRAs.
+
+
+
